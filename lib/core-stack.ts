@@ -1,9 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
-import { HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
+import { CfnIntegration, HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpIamAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
-import { Runtime, Tracing } from 'aws-cdk-lib/aws-lambda';
+import { CfnPermission, Runtime, Tracing } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { LogGroup } from 'aws-cdk-lib/aws-logs';
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
@@ -63,6 +63,14 @@ export class CoreStack extends Stack {
       integration: new HttpLambdaIntegration('ItemsIntegration', release.alias),
       authorizer: new HttpIamAuthorizer(),
     });
+
+    // The first release with an alias updates a running API. The integration moves from the function to the alias,
+    // and the invoke permission moves too. The permission must exist before the integration calls the alias.
+    // Without this line, CloudFormation may update the integration first, and the API fails for a few seconds.
+    const permission = api.node.findAll().find((node): node is CfnPermission => node instanceof CfnPermission);
+    const integration = api.node.findAll().find((node): node is CfnIntegration => node instanceof CfnIntegration);
+    if (!permission || !integration) throw new Error('The API has no integration or no invoke permission.');
+    integration.addResourceDependency(permission, 'The alias needs the invoke permission before the API calls it.');
 
     new ServiceDashboard(this, 'Dashboard', { service: 'core', release, api });
 

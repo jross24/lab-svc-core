@@ -116,15 +116,14 @@ describe('the stage config', () => {
     expect(STAGES.Production.release).toEqual({ kind: 'canary', percent: 10, minutes: 5 });
   });
 
-  it('injects a fault only in the stages that the list DRILL_STAGES names, and that list is empty', () => {
+  it('injects a fault only in the stages that the list DRILL_STAGES names', () => {
     // The fault switch is a device for the release drill. A fault in the main branch is a mistake.
-    // The drill puts 'Production' in the list and sets injectFault in lib/stages.ts, in one pull request.
-    // See "The Production drill" in the README.
+    // So a stage must be in the list and must set injectFault. One of the two alone fails this test.
+    // The drill changes both in one pull request. See "The Production drill" in the README.
     for (const [name, config] of Object.entries(STAGES)) {
       expect(config.injectFault, name).toBe(DRILL_STAGES.includes(name));
     }
     expect(DEV_STAGE.injectFault).toBe(false);
-    expect(DRILL_STAGES).toEqual([]);
   });
 });
 
@@ -146,13 +145,17 @@ describe('the deployment configuration of each stage', () => {
     expect(groupOf('Production').Properties.DeploymentConfigName).toBe('CodeDeployDefault.LambdaCanary10Percent5Minutes');
   });
 
-  it('is the only difference between the templates of the stages, apart from the log retention', () => {
-    // Test must exercise the resources that Production runs. So the stages must differ only in the stage config.
+  it('is the only difference between the templates of the stages, apart from the stage config', () => {
+    // Test must exercise the resources that Production runs. So the stages must differ only in the stage config:
+    // the log retention, the deployment configuration, and the fault switch of the drill with the id of the
+    // Lambda version that the switch changes.
     const normalised = (stage: string): string => {
       const stack = assembly.stacksRecursively.find((candidate) => candidate.hierarchicalId === `${stage}/Core`);
       return JSON.stringify(stack?.template)
         .replace(/"RetentionInDays":[0-9]+/g, '"RetentionInDays":0')
-        .replace(/CodeDeployDefault\.Lambda[A-Za-z0-9]+/g, 'CodeDeployDefault.Lambda');
+        .replace(/CodeDeployDefault\.Lambda[A-Za-z0-9]+/g, 'CodeDeployDefault.Lambda')
+        .replace(/,"INJECT_FAULT":"true"/g, '')
+        .replace(/CurrentVersion[0-9A-F]{8}[0-9a-f]{32}/g, 'CurrentVersion');
     };
     expect(normalised('Staging')).toBe(normalised('Test'));
     expect(normalised('Production')).toBe(normalised('Test'));

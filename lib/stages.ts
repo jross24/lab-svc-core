@@ -1,13 +1,5 @@
 import { RetentionDays } from 'aws-cdk-lib/aws-logs';
-
-// How CodeDeploy moves the traffic of the alias "live" to a new version of the function.
-// Every stage has the same CodeDeploy resources and the same alarms. Only this setting differs.
-export type Release =
-  // All the traffic goes to the new version at once. The alarms still stop a bad deployment.
-  | { readonly kind: 'allAtOnce' }
-  // The new version gets `percent` of the traffic. After `minutes` minutes it gets all the traffic.
-  // CodeDeploy has a fixed list of canary configurations. The type allows only the one that the lab uses.
-  | { readonly kind: 'canary'; readonly percent: 10; readonly minutes: 5 };
+import type { Release } from './gradual-release.ts';
 
 // The settings that can differ between stages. All other things are the same in each stage.
 export interface StageConfig {

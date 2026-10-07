@@ -134,6 +134,12 @@ describe('the alias live', () => {
     });
   });
 
+  it('is the target of the invoke permission before the integration calls it', () => {
+    // The update of a running stack must not leave a moment where the API calls the alias without a permission.
+    const permissionId = onlyKey(template.findResources('AWS::Lambda::Permission'));
+    template.hasResource('AWS::ApiGatewayV2::Integration', { DependsOn: Match.arrayWith([permissionId]) });
+  });
+
   it('gets a new published version for each release', () => {
     const versionOf = (version: string): string[] =>
       Object.keys(synth(version).template.findResources('AWS::Lambda::Version'));
@@ -327,34 +333,114 @@ describe('the fault switch', () => {
   });
 });
 
+interface Widget {
+  readonly type: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly properties: {
+    readonly title?: string;
+    readonly stacked?: boolean;
+    readonly metrics?: readonly (readonly unknown[])[];
+    readonly alarms?: readonly string[];
+    readonly annotations?: { readonly horizontal?: readonly { readonly value: number }[] };
+  };
+}
+
+// CloudFormation fills the tokens of the dashboard body (Ref and GetAtt) when it deploys. In the test, each
+// token becomes a marker such as <Ref:Name> or <GetAtt:Name.Arn>. Then the body is a plain JSON text.
+function dashboardWidgets(template: Template): Widget[] {
+  const [dashboard] = Object.values(template.findResources('AWS::CloudWatch::Dashboard')) as {
+    Properties: { DashboardBody: { 'Fn::Join': [string, unknown[]] } };
+  }[];
+  const parts = dashboard?.Properties.DashboardBody['Fn::Join'][1] ?? [];
+  const text = parts
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      const token = part as { Ref?: string; 'Fn::GetAtt'?: string[] };
+      return token.Ref ? `<Ref:${token.Ref}>` : `<GetAtt:${(token['Fn::GetAtt'] ?? []).join('.')}>`;
+    })
+    .join('');
+  return (JSON.parse(text) as { widgets: Widget[] }).widgets;
+}
+
 describe('the dashboard', () => {
   const { template } = synth();
-  const body = JSON.stringify(template.findResources('AWS::CloudWatch::Dashboard'));
+  const widgets = dashboardWidgets(template);
+  const widget = (title: string): Widget => {
+    const found = widgets.find((candidate) => candidate.properties.title === title);
+    expect(found, title).toBeDefined();
+    return found as Widget;
+  };
+  const functionId = onlyKey(template.findResources('AWS::Lambda::Function'));
+  const apiId = onlyKey(template.findResources('AWS::ApiGatewayV2::Api'));
 
   it('is one dashboard with a fixed name', () => {
     template.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
     template.hasResourceProperties('AWS::CloudWatch::Dashboard', { DashboardName: 'lab-svc-core' });
   });
 
-  it('shows the requests by version from the embedded metrics', () => {
-    expect(body).toContain('Lab/Service');
-    expect(body).toContain('Requests by version');
-    expect(body).toContain('SEARCH(');
-    expect(body).toContain('requests');
-  });
-
-  it('shows the errors, the p50 and p99 duration and the API 4xx and 5xx', () => {
-    for (const text of ['Errors', 'Duration', 'p50', 'p99', 'AWS/ApiGateway', '4xx', '5xx']) {
-      expect(body).toContain(text);
+  it('has a text widget, four metric widgets and an alarm widget, all inside the 24 columns of the grid', () => {
+    expect(widgets.map((candidate) => candidate.type).sort()).toEqual(['alarm', 'metric', 'metric', 'metric', 'metric', 'text']);
+    for (const candidate of widgets) {
+      expect(candidate.x).toBeGreaterThanOrEqual(0);
+      expect(candidate.x + candidate.width).toBeLessThanOrEqual(24);
+      expect(candidate.height).toBeGreaterThan(0);
     }
   });
 
-  it('shows the state of both alarms', () => {
-    const alarmIds = Object.keys(template.findResources('AWS::CloudWatch::Alarm'));
-    expect(alarmIds).toHaveLength(2);
-    expect(body).toContain('\\"type\\":\\"alarm\\"');
-    for (const id of alarmIds) {
-      expect(body).toContain(id);
-    }
+  it('shows the requests by version from the embedded metrics, one line for each version', () => {
+    const requests = widget('Requests by version');
+    expect(requests.properties.stacked).toBe(true);
+    expect(requests.properties.metrics).toEqual([
+      [
+        {
+          expression: `SEARCH('{Lab/Service,service,version} service="core" MetricName="requests"', 'Sum', 60)`,
+          period: 60,
+        },
+      ],
+    ]);
+  });
+
+  it('shows the errors of the alias live, with the line of the alarm', () => {
+    const errors = widget('Errors of the alias live');
+    expect(errors.properties.metrics).toEqual([
+      [
+        'AWS/Lambda',
+        'Errors',
+        'FunctionName',
+        `<Ref:${functionId}>`,
+        'Resource',
+        `<Ref:${functionId}>:live`,
+        { label: 'Lambda errors', period: 60, stat: 'Sum' },
+      ],
+    ]);
+    expect(errors.properties.annotations?.horizontal?.map((line) => line.value)).toEqual([1]);
+  });
+
+  it('shows the p50 and the p99 duration of the alias live, with the line of the alarm', () => {
+    const duration = widget('Duration of the alias live');
+    expect(duration.properties.metrics?.map((metric) => metric.slice(0, 6))).toEqual([
+      ['AWS/Lambda', 'Duration', 'FunctionName', `<Ref:${functionId}>`, 'Resource', `<Ref:${functionId}>:live`],
+      ['AWS/Lambda', 'Duration', 'FunctionName', `<Ref:${functionId}>`, 'Resource', `<Ref:${functionId}>:live`],
+    ]);
+    expect(duration.properties.metrics?.map((metric) => (metric[6] as { stat: string }).stat)).toEqual(['p50', 'p99']);
+    expect(duration.properties.annotations?.horizontal?.map((line) => line.value)).toEqual([LATENCY_P99_THRESHOLD_MS]);
+  });
+
+  it('shows the 4xx and the 5xx of API Gateway for this API', () => {
+    const gateway = widget('API Gateway 4xx and 5xx');
+    expect(gateway.properties.metrics?.map((metric) => metric.slice(0, 4))).toEqual([
+      ['AWS/ApiGateway', '4xx', 'ApiId', `<Ref:${apiId}>`],
+      ['AWS/ApiGateway', '5xx', 'ApiId', `<Ref:${apiId}>`],
+    ]);
+  });
+
+  it('shows the state of both alarms, the errors alarm and then the latency alarm', () => {
+    const errorsAlarm = Object.keys(template.findResources('AWS::CloudWatch::Alarm', { Properties: { MetricName: 'Errors' } }));
+    const latencyAlarm = Object.keys(template.findResources('AWS::CloudWatch::Alarm', { Properties: { MetricName: 'Duration' } }));
+    const alarmWidget = widgets.find((candidate) => candidate.type === 'alarm');
+    expect(alarmWidget?.properties.alarms).toEqual([`<GetAtt:${errorsAlarm[0]}.Arn>`, `<GetAtt:${latencyAlarm[0]}.Arn>`]);
   });
 });

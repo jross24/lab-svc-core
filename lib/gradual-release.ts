@@ -5,12 +5,21 @@ import type { ILambdaDeploymentConfig } from 'aws-cdk-lib/aws-codedeploy';
 import { Alias } from 'aws-cdk-lib/aws-lambda';
 import type { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
-import type { Release } from './stages.ts';
+
+// How CodeDeploy moves the traffic of the alias "live" to a new version of the function.
+// Every stage has the same CodeDeploy resources and the same alarms. Only this setting differs.
+export type Release =
+  // All the traffic goes to the new version at once. The alarms still stop a bad deployment.
+  | { readonly kind: 'allAtOnce' }
+  // The new version gets `percent` of the traffic. After `minutes` minutes it gets all the traffic.
+  // CodeDeploy has a fixed list of canary configurations. The type allows only the one that the lab uses.
+  | { readonly kind: 'canary'; readonly percent: 10; readonly minutes: 5 };
 
 export const ALIAS_NAME = 'live';
 
-// The p99 duration of the function. A normal call takes a few milliseconds. The timeout of the function
-// is 3 seconds (FUNCTION_TIMEOUT in core-stack.ts). This value is far above normal, and it is a sixth of the timeout,
+// The p99 duration of the function. The function does almost no work, so a normal call should take a few milliseconds.
+// (The lab did not measure this in Lambda yet. Look at the graph "Duration of the alias live" and adjust.)
+// The timeout of the function is 3 seconds (FUNCTION_TIMEOUT in core-stack.ts). This value is a sixth of the timeout,
 // so the alarm fires on a real fault, and not on one slow call.
 export const LATENCY_P99_THRESHOLD_MS = 500;
 
