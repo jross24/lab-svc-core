@@ -16,10 +16,19 @@ function synth(serviceErrors?: GradualReleaseProps['serviceErrors']) {
   const release = new GradualRelease(stack, 'Release', {
     function: fn,
     release: { kind: 'allAtOnce' },
+    latencyP99ThresholdMs: 750,
     ...(serviceErrors ? { serviceErrors } : {}),
   });
   return { release, template: Template.fromStack(stack) };
 }
+
+describe('GradualRelease latency alarm', () => {
+  it('uses the threshold that the service gives, and shows it on the construct', () => {
+    const { release, template } = synth();
+    expect(release.latencyP99ThresholdMs).toBe(750);
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', { MetricName: 'Duration', Threshold: 750 });
+  });
+});
 
 describe('GradualRelease with no serviceErrors', () => {
   const { release, template } = synth();

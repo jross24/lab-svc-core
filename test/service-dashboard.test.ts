@@ -43,6 +43,7 @@ function synth(serviceErrors?: GradualReleaseProps['serviceErrors']) {
   const release = new GradualRelease(stack, 'Release', {
     function: fn,
     release: { kind: 'allAtOnce' },
+    latencyP99ThresholdMs: 750,
     ...(serviceErrors ? { serviceErrors } : {}),
   });
   new ServiceDashboard(stack, 'Dashboard', { service: 'catalogue', release, api: new HttpApi(stack, 'Api') });

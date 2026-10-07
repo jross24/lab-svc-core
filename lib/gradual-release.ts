@@ -18,12 +18,6 @@ export type Release =
 
 export const ALIAS_NAME = 'live';
 
-// The p99 duration of the function. The function does almost no work, so a normal call should take a few milliseconds.
-// (The lab did not measure this in Lambda yet. Look at the graph "Duration of the alias live" and adjust.)
-// The timeout of the function is 3 seconds (FUNCTION_TIMEOUT in core-stack.ts). This value is a sixth of the timeout,
-// so the alarm fires on a real fault, and not on one slow call.
-export const LATENCY_P99_THRESHOLD_MS = 500;
-
 const PERIOD = Duration.minutes(1);
 
 export function deploymentConfigOf(release: Release): ILambdaDeploymentConfig {
@@ -39,6 +33,10 @@ export function deploymentConfigOf(release: Release): ILambdaDeploymentConfig {
 export interface GradualReleaseProps {
   readonly function: LambdaFunction;
   readonly release: Release;
+  // The latency alarm fires when the p99 duration of the alias is over this value, in two periods in a row.
+  // Each service chooses its own value from its own measurements. A service that calls another service waits
+  // for that call, so its duration includes the time of the call.
+  readonly latencyP99ThresholdMs: number;
   // Set this for a service that answers a failure with a 5xx status or with a degraded page, and does not throw.
   // Lambda counts a call as an error only when the function throws or times out. So the alarm on Lambda Errors
   // does not see a handled failure. This option adds a third alarm on the metric "errors" that the service writes
@@ -57,6 +55,7 @@ export class GradualRelease extends Construct {
   readonly alias: Alias;
   readonly errorsAlarm: Alarm;
   readonly latencyAlarm: Alarm;
+  readonly latencyP99ThresholdMs: number;
   // Only for a service that sets serviceErrors.
   readonly serviceErrorsAlarm?: Alarm;
   readonly deploymentGroup: LambdaDeploymentGroup;
@@ -66,6 +65,8 @@ export class GradualRelease extends Construct {
 
     // `currentVersion` publishes a new Lambda version when the function changes. The version number of
     // the release is in the environment of the function, so each release publishes a new version.
+    this.latencyP99ThresholdMs = props.latencyP99ThresholdMs;
+
     this.alias = new Alias(this, 'Alias', {
       aliasName: ALIAS_NAME,
       version: props.function.currentVersion,
@@ -85,9 +86,9 @@ export class GradualRelease extends Construct {
 
     // Two periods in a row, so one slow call (for example the first call of a new version) does not stop a release.
     this.latencyAlarm = new Alarm(this, 'LatencyAlarm', {
-      alarmDescription: `The p99 duration of the alias live was over ${LATENCY_P99_THRESHOLD_MS} ms for two minutes. This alarm also stops a deployment.`,
+      alarmDescription: `The p99 duration of the alias live was over ${props.latencyP99ThresholdMs} ms for two minutes. This alarm also stops a deployment.`,
       metric: this.alias.metricDuration({ statistic: 'p99', period: PERIOD }),
-      threshold: LATENCY_P99_THRESHOLD_MS,
+      threshold: props.latencyP99ThresholdMs,
       comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
       evaluationPeriods: 2,
       datapointsToAlarm: 2,

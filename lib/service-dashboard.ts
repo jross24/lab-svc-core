@@ -9,7 +9,6 @@ import {
 } from 'aws-cdk-lib/aws-cloudwatch';
 import { Construct } from 'constructs';
 import type { GradualRelease } from './gradual-release.ts';
-import { LATENCY_P99_THRESHOLD_MS } from './gradual-release.ts';
 import { METRIC_NAMESPACE } from './metrics.ts';
 
 const PERIOD = Duration.minutes(1);
@@ -87,7 +86,7 @@ export class ServiceDashboard extends Construct {
           alias.metricDuration({ statistic: 'p99', period: PERIOD, label: 'p99' }),
         ],
         leftAnnotations: [
-          { value: LATENCY_P99_THRESHOLD_MS, label: 'p99 alarm threshold', color: '#d62728' },
+          { value: release.latencyP99ThresholdMs, label: 'p99 alarm threshold', color: '#d62728' },
         ],
         leftYAxis: { min: 0, label: 'ms', showUnits: false },
       }),
