@@ -3,13 +3,16 @@ import { CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import { CfnIntegration, HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpIamAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
-import { CfnPermission, Runtime, Tracing } from 'aws-cdk-lib/aws-lambda';
+import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import { CfnPermission, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { LogGroup } from 'aws-cdk-lib/aws-logs';
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
+import { FUNCTION_BUNDLING, FUNCTION_MEMORY_MB } from './function-defaults.ts';
 import { GradualRelease } from './gradual-release.ts';
 import { ServiceDashboard } from './service-dashboard.ts';
+import { TransactionSearch } from './transaction-search.ts';
 import type { StageConfig } from './stages.ts';
 
 const ITEMS_PATH = '/items';
@@ -17,11 +20,11 @@ const ITEMS_PATH = '/items';
 // The latency alarm compares the p99 duration with a threshold far below this limit.
 export const FUNCTION_TIMEOUT = Duration.seconds(3);
 
-// The p99 duration of the function. The function does almost no work, so a normal call should take a few milliseconds.
-// (The lab did not measure this in Lambda yet. Look at the graph "Duration of the alias live" and adjust.)
-// The timeout of the function is 3 seconds. This value is a sixth of the timeout,
-// so the alarm fires on a real fault, and not on one slow call.
-export const LATENCY_P99_THRESHOLD_MS = 500;
+// The p99 duration of the function, in milliseconds. The lab measured it (see "The latency threshold" in the README):
+// a warm call takes about 45 ms with tracing, and the first call of a new environment takes about 450 ms.
+// The alarm must not fire on that first call, so the value is twice the cold call. It is also a third of the
+// timeout of 3 seconds, which is the highest value that the unit test allows.
+export const LATENCY_P99_THRESHOLD_MS = 1000;
 
 export interface CoreStackProps {
   readonly version: string;
@@ -37,8 +40,9 @@ export class CoreStack extends Stack {
       entry: fileURLToPath(new URL('./items-handler.ts', import.meta.url)),
       runtime: Runtime.NODEJS_22_X,
       timeout: FUNCTION_TIMEOUT,
-      // Lambda sends a segment to X-Ray for each call. The README explains why this is the tracing choice.
-      tracing: Tracing.ACTIVE,
+      memorySize: FUNCTION_MEMORY_MB,
+      bundling: FUNCTION_BUNDLING,
+      // No active tracing of Lambda: OpenTelemetry makes the traces (lib/tracing.ts). The README explains why.
       environment: {
         // The version of the release is a part of the function, so each release publishes a new Lambda version.
         VERSION: props.version,
@@ -49,6 +53,12 @@ export class CoreStack extends Stack {
         removalPolicy: RemovalPolicy.DESTROY,
       }),
     });
+
+    // The function sends its spans to the OTLP endpoint of X-Ray. The endpoint checks this permission.
+    // X-Ray actions do not support a resource, so the resource is *.
+    itemsFunction.addToRolePolicy(new PolicyStatement({ actions: ['xray:PutTraceSegments'], resources: ['*'] }));
+    // The endpoint works only with Transaction Search, which is a setting of the whole account.
+    new TransactionSearch(this, 'TransactionSearch');
 
     // The alias `live` is what the API calls. CodeDeploy moves the traffic of the alias to each new version.
     const release = new GradualRelease(this, 'Release', {

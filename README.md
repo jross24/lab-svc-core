@@ -82,7 +82,7 @@ The second command lists `Test/Core`, `Staging/Core` and `Production/Core`. The 
   `CodeDeployDefault.LambdaAllAtOnce` in Test and Staging, `CodeDeployDefault.LambdaCanary10Percent5Minutes` in Production.
 - **Two alarms** on the alias. The deployment group watches both.
   - `ErrorsAlarm`: it fires on one error or more in a period of 1 minute.
-  - `LatencyAlarm`: it fires when the p99 duration is over 500 ms in 2 periods of 1 minute in a row. The function does almost no work, so a normal call should take a few milliseconds. The lab has not measured this in Lambda yet. The function times out at 3 seconds.
+  - `LatencyAlarm`: it fires when the p99 duration is over 1000 ms in 2 periods of 1 minute in a row. The function does almost no work. See "The latency threshold" for the measurements. The function times out at 3 seconds.
 - A service that answers a failure with a 5xx status, or with a degraded page, and does not throw can switch on a third alarm. Lambda counts a call as an error only when the function throws or times out,
   so the alarm `ErrorsAlarm` does not see such a call. The option `serviceErrors` of `GradualRelease` adds `ServiceErrorsAlarm`. It reads the metric `errors` that the service writes itself.
   It watches the version that the stack deploys, so during a canary it sees the errors of the new version and not of the old one. Core does not use it, because core throws when it fails.
@@ -94,17 +94,35 @@ The code is in `lib/gradual-release.ts`.
 
 ### How a Production release goes, minute by minute
 
-The times are estimates. The canary step is exactly 5 minutes. The other times depend on the runner and on CloudFormation.
+The times are measured. They come from the release 0.3.0 of core in Production, on 2026-10-07.
+CodeDeploy ran the deployment `d-QWUJ3PCYJ` with the configuration `CodeDeployDefault.LambdaCanary10Percent5Minutes`.
+The times are minutes and seconds after the reviewer approved. The canary step is exactly 5 minutes.
+The other times depend on the runner and on CloudFormation, so another release can differ by some seconds.
 
 | Time | What happens |
 | --- | --- |
 | before 0:00 | The release passed Test (with the end-to-end suite) and Staging. The job `deploy-production` waits for the reviewer. |
-| 0:00 | The reviewer approves. The job starts. |
-| 0:00 to 1:00 | The job installs the CDK, checks the zip against its SHA-256 and starts `cdk deploy`. |
-| about 1:00 | CloudFormation publishes the new Lambda version and moves the alias `live` to it. CodeDeploy starts a deployment. |
-| 1:00 to 6:00 | The alias sends 10 percent of the calls to the new version and 90 percent to the old version. CodeDeploy reads the two alarms during this time. |
-| about 6:00 | No alarm fired. CodeDeploy sends 100 percent of the calls to the new version. |
-| 6:00 to 8:00 | The deployment succeeds. CloudFormation removes the old version and finishes the stack update. The job prints the outputs and ends. |
+| 0:00 | The reviewer approves. |
+| 0:02 | The job starts. |
+| 0:33 | The job has installed the CDK, checked the zip against its SHA-256 and started `cdk deploy`. CloudFormation starts the stack update. |
+| 0:52 | CloudFormation has updated the function and has published the new Lambda version. |
+| 0:54 | CloudFormation starts the update of the alias `live`. CodeDeploy creates the deployment. The alias sends 10 percent of the calls to the new version and 90 percent to the old version. |
+| 0:54 to 5:56 | The canary. CodeDeploy reads the two alarms. No alarm fires. The deployment is `InProgress` for 5 minutes and 2 seconds. |
+| 5:56 | CodeDeploy sends 100 percent of the calls to the new version. The deployment is `Succeeded`. |
+| 5:59 | CloudFormation sees the end of the deployment. The alias update is complete. |
+| 6:01 to 6:03 | CloudFormation deletes the old Lambda version. The stack is `UPDATE_COMPLETE`. |
+| 6:08 | The job prints the outputs and ends. |
+
+The whole release took 6 minutes and 8 seconds after the approval. The first estimate in this README was about 8 minutes.
+Most of the difference was in the last step: the estimate gave 2 minutes for the end, and the real end took 12 seconds.
+
+What the lab saw during the canary:
+
+- `aws lambda get-alias` showed version 1 with `RoutingConfig` `{"2": 0.1}`: 10 percent of the calls went to version 2. After the canary it showed version 2 and no routing.
+- A signed loop called the private API every 2 seconds. The metric `requests` showed **both releases** for 5 minutes (calls in each minute, 0.2.0 / 0.3.0):
+  22 / 4, 22 / 5, 33 / 4, 32 / 1 and 30 / 3. That is 17 of 156 calls (11 percent) for the new release. In the next minute the numbers were 3 / 28, and then 0 / 25.
+- Old version 1 was gone after the release. CloudFormation deletes the old Lambda version in its clean-up step, so a hand rollback is a redeploy of the old release (see "Roll back by hand"), and not a move of the alias.
+- After the release: the stack was `UPDATE_COMPLETE`, both alarms were `OK`, a signed call showed `0.3.0`, an unsigned call got `403`, and the Production web page answered 200 with core `0.3.0`.
 
 Test and Staging use the same steps, but the alias moves to the new version at once.
 
@@ -115,7 +133,8 @@ Test and Staging use the same steps, but the alias moves to the new version at o
 - CodeDeploy cannot read the state of an alarm. The deployment stops.
 
 CodeDeploy reports the failure to CloudFormation. The stack update fails and CloudFormation rolls the stack back.
-Then `cdk deploy` ends with an error, and the job `deploy-production` fails. The lab has not yet run this case. The drill below proves it.
+Then `cdk deploy` ends with an error, and the job `deploy-production` fails.
+The lab ran this case in its own account `lab-dev` (see "What the lab saw in lab-dev" below). It did not run it in Production: the owner runs that drill.
 
 What does not roll a release back:
 
@@ -128,6 +147,8 @@ What does not roll a release back:
 CodeDeploy needs an old version to move traffic from. When the alias does not exist, CloudFormation creates it and starts no deployment.
 So **the first release that contains this change goes to each stage without a canary**. The second release is the first gradual release.
 The drill below starts with a small second release for this reason.
+
+The lab checked this in Production. Before the second release of core, `aws deploy list-deployments` showed no deployment, and the alias pointed to version 1.
 
 ### How to watch a release
 
@@ -195,7 +216,8 @@ The function writes **one line of JSON for each request**:
 
 - The level is `INFO` for status below 400, `WARN` for 4xx and `ERROR` for 5xx and for a thrown error. A thrown error adds the field `error`.
 - The line holds no body, no header and no query string.
-- The field `traceId` is the X-Ray trace of the call. It links a log line to its trace.
+- The field `traceId` is the trace of the request, in the form of X-Ray (`1-` and 8 hex digits, a dash, 24 hex digits).
+  One request that passes web, a public API and core has the same `traceId` in the log line of each of them. See "Tracing".
 - The field `coldStart` is `true` on the first request of an execution environment, and it is absent on all other lines.
   The init time of the function falls on that request, so a slow line with `coldStart` is a cold start and not a slow code path.
 - The field `degraded` holds a short reason when a handler answered with a good status but handled a failure (a page with an error block). Core never sets it. The sibling `lab-web` does.
@@ -237,47 +259,156 @@ Native metrics count a failed call even when the function code did not run, for 
 
 ### Tracing
 
-**Choice: Lambda active tracing (X-Ray). Not the AWS Distro for OpenTelemetry (ADOT) layer, not yet.**
+**Choice: OpenTelemetry in all four services. The SDK is bundled into the function. The spans go straight to the OTLP endpoint of X-Ray.**
 
-What active tracing gives:
+One request to the web page makes **one trace** with the spans of web, of catalogue or account, and of core.
+Every service writes the same trace ID in its JSON log line. This is the goal of [lab-platform#25](https://github.com/jross24/lab-platform/issues/25).
 
-- Lambda sends a trace to X-Ray for a sampled call. The trace has two segments: `AWS::Lambda` and `AWS::Lambda::Function`.
-- It needs one setting (`tracing: Tracing.ACTIVE`). The role of the function gets `xray:PutTraceSegments` and `xray:PutTelemetryRecords`.
-- It adds no layer, no package and no code. AWS publishes no figure for its cost in cold start or memory.
-- The log line carries the trace ID, so you can go from a log line to its trace.
+#### The short version
 
-What it does **not** give, and the facts behind this:
+1. Each service has a server span for each request. The call to the next service is a client span.
+2. The caller puts the W3C header `traceparent` on the call. The next service reads it and continues the trace.
+3. At the end of each request, the service signs one HTTPS call and sends all its spans to X-Ray (the OTLP endpoint). This needs CloudWatch Transaction Search in the account.
+4. The cost: 512 MB of memory instead of 128 MB, about 35 to 40 ms for each request, and about 430 ms for the first request of a new environment.
+   The cold page still became faster than before (2.6 s against 4.8 s), because the memory also gives more CPU.
 
-- **No API Gateway segment.** HTTP APIs do not support X-Ray tracing. Only REST APIs do. This holds for ADOT too.
-- **No trace across services.** Active tracing does not read a trace header from a request, and it does not pass one on.
-  When catalogue calls core, core starts its own trace. One trace across web, the public API and core needs OpenTelemetry (or the X-Ray SDK) in every service.
-  The X-Ray SDK is in maintenance mode since February 2026. AWS recommends OpenTelemetry.
+#### How it works
 
-Why not ADOT now:
+- `lib/instrument.ts` wraps the handler. It starts the server span, runs the handler, writes the log line and the metric line, ends the span, and sends the spans.
+- `lib/tracing.ts` holds the OpenTelemetry parts. It uses no global state of OpenTelemetry, so a unit test can make as many instances as it wants.
+  The trace IDs come from the X-Ray ID generator, because X-Ray drops a trace whose ID does not start with the time.
+- A service that calls another service sends the call through `tracing.fetch`. It makes the client span and adds the header `traceparent`.
+  The services sign the request **first** and add `traceparent` **after** the signature. The signature lists only `host` and the `x-amz-*` headers.
+  So the extra header does not break it. The lab checked this with a real call: API Gateway answered 200 to a signed request with `traceparent` and with `X-Amzn-Trace-Id` added after the signature.
+- `lib/xray-exporter.ts` sends the spans to `https://xray.<region>.amazonaws.com/v1/traces`. The request is signed with Signature Version 4 for the service `xray` (`lib/sigv4.ts`).
+  The OpenTelemetry exporter for JavaScript cannot sign a request. A unit test checks `sigv4.ts` against two vectors of the AWS test suite.
+  A failed export never fails a request. The function writes one `WARN` line without the body of the answer.
+- The log field `traceId` has the form of X-Ray. Take it from a log line to find the trace (see below).
+- The function role needs one more permission: `xray:PutTraceSegments` on `*`. X-Ray actions do not support a resource. It is the only X-Ray action.
+- Lambda active tracing is **off**. With both, each call would make two traces with different IDs.
 
-- **Cold start.** The AWS documentation says that the layer needs more memory and adds cold start time. It gives no figure.
-  User reports for the older layer, which embeds a collector, say 1 to 5 seconds (for example [aws-otel-lambda issue 228](https://github.com/aws-observability/aws-otel-lambda/issues/228), from 2022). The lab already uses 3.8 s of the 5 s limit in a cold chain (lab-platform#17).
-  The lab did not measure the layer. A measurement needs a deployed function.
-- **Memory.** The functions have 128 MB. AWS gives no minimum for the layer. The older layer runs a collector process next to the function, so the function would need more memory.
-- **The layer ARN.** An ADOT layer belongs to an AWS-owned account, and its ARN holds that account ID. I found no SSM parameter that gives the ARN, so the ARN would sit in this public repository.
-  That ID is not a lab account and it is not secret. But it breaks the unit test that forbids a 12-digit account ID in a template, and it pins code from another account into the function.
-  The helper `AdotLayerVersion` in `aws-cdk-lib` embeds the ID of the older layer family, and its documentation calls that family legacy.
-  AWS now recommends a newer layer family. This repository uses neither, so no AWS-owned account ID is in the repository.
-- **Propagation over the signed fetch.** It can work. SigV4 checks only the signed headers (`host` and the `x-amz-*` headers). The layer adds `traceparent` after the signing, so the signature stays valid.
-  The instrumentation of `fetch` is in the layer but is off by default. Each caller must turn it on. The AWS documentation does not confirm that API Gateway accepts the extra header, so the lab must test it.
-- **Not verified.** Whether the layer instruments an esbuild bundle in ESM, and whether it works at 128 MB, are not documented. The lab could not test them before a release.
+#### Why Transaction Search, and why core turns it on
 
-The trade-off: the lab gets traces of the Lambda calls now, with no risk to the cold start. It does not get one trace across services.
-The gap has an issue: [lab-platform#25](https://github.com/jross24/lab-platform/issues/25). It lists what to test before a move to OpenTelemetry in all four services.
+The endpoint accepts spans only when CloudWatch Transaction Search is on. The setting belongs to the whole account and the whole region.
+Then X-Ray writes each span as a log event into the log group `aws/spans`, and indexes a part of the spans as traces that `aws xray batch-get-traces` finds.
 
-How to see a trace: take the `traceId` from a log line. Open CloudWatch, then X-Ray traces, and search for the ID. Or use the command line:
+`lib/transaction-search.ts` turns it on with two resources: a policy of CloudWatch Logs that lets X-Ray write into `aws/spans` of this account, and `AWS::XRay::TransactionSearchConfig` with 100 percent indexing.
+Core owns the setting, because core deploys first and the platform stack has no pipeline. See [lab-platform#27](https://github.com/jross24/lab-platform/issues/27).
+The first deployment waits until the setting is active. This took 6 minutes in the lab-dev account. So the job `deploy-test` has a limit of 15 minutes now.
+
+#### What was measured
+
+The lab compared three ways in its own account `lab-dev`, with a plain function as the base. The Lambda functions run Node.js 22 on x86. Each cell has 5 cold starts and 15 warm calls.
+The times come from the `REPORT` lines of Lambda. "First request" is the duration of the first call after the init.
+
+| Way | Zip of the function | Init (128 MB / 512 MB) | First request (128 MB / 512 MB) | Warm request, p50 (128 MB / 512 MB) | Memory used |
+| --- | --- | --- | --- | --- | --- |
+| Base: no tracing | 2 KB | 134 / 134 ms | 112 / 16 ms | 1.6 / 1.6 ms | 77 MB |
+| **SDK in the function, ES module (chosen)** | 26 KB (111 KB of code) | 160 / 159 ms | 1918 / 448 ms | 164 / 37 ms | 102 to 112 MB |
+| SDK in the function, CommonJS (the CDK default) | 107 KB (641 KB of code) | 208 / 206 ms | 1928 / 449 ms | 78 / 41 ms | 105 to 117 MB |
+| SDK in the function, ES module, minified | 16 KB (47 KB of code) | 158 / 128 ms | 1943 / 433 ms | 98 / 39 ms | 104 to 111 MB |
+| ADOT layer, CommonJS bundle (the CDK default) | layer 2.6 MB | the function does not start | | | |
+| ADOT layer, ES module | layer 2.6 MB, function 2 KB | 830 / 857 ms | 309 / 95 ms | 20 / 2.6 ms (see below) | 121 to 141 MB |
+
+What the table shows:
+
+- **Memory is the lever.** At 128 MB the first request of the SDK variant takes 1.9 s, because the TLS connection to X-Ray needs CPU. At 256 MB it takes 0.9 s, at 512 MB 0.45 s, and at 1024 MB 0.24 s.
+  The warm request follows: 164, 64, 37 and 34 ms. The services use 512 MB.
+- **The ES module halves the bundle size and the init.** With the module entry of each package, esbuild removes most of the unused code (641 KB become 111 KB).
+  Minifying brings no gain in the cold start, so the lab does not minify. The code stays readable in a stack trace.
+- **The ADOT layer cannot instrument the default bundle.** The layer failed at init with `TypeError: Cannot redefine property: handler`.
+  esbuild writes the exports of a CommonJS bundle as properties that cannot be changed, and the layer wants to wrap the handler. An ES module bundle works.
+- **The layer adds about 700 ms to each cold start at every memory size.** It adds 2.6 MB of code and 45 to 65 MB of memory (the SDK way adds 25 to 35 MB). The init of the layer runs before the first request, so the first request itself is cheap (95 ms at 512 MB).
+- **The layer is cheap on a warm request, if it records.** The warm request cost 2.6 ms, because the layer exports in the background. But with the default settings it recorded nothing:
+  the layer reads the trace header of Lambda first. Without active tracing that header says "not sampled", and the layer drops the spans. The lab got spans only with active tracing, or with `OTEL_TRACES_SAMPLER=always_on`.
+- **With its default settings, the layer prefers the trace of Lambda to the header of the caller.** The code of the layer (version 16) replaces the header `X-Amzn-Trace-Id` of the request with the header that Lambda made for the call. It then asks the propagators `baggage, tracecontext, xray` in this order.
+  The last one that finds a valid trace wins, and that is the X-Ray header of Lambda. So an incoming `traceparent` loses, unless a team sets `OTEL_PROPAGATORS` to another order. The lab read this in the code of the layer and did not run a chain with the layer.
+- **The layer does not trace `fetch` by default.** Its list of instrumentations is `aws-sdk,aws-lambda,http`. The `fetch` of Node.js 22 does not use the `http` module, so a caller must turn on the `undici` instrumentation.
+- **The ARN of the layer holds the account ID of AWS** (`615299751070`, layer `AWSOpenTelemetryDistroJs`, version 16 in `eu-west-2`). The lab found no SSM parameter that gives it. The SDK way has no layer, so no account ID of another publisher is in this repository.
+
+**The third way: native active tracing and a hand-made header.** This cannot link the services. The lab sent a signed call with `X-Amzn-Trace-Id` and `traceparent` to a function with active tracing:
+
+- The header reached the function. API Gateway added a part of its own: `Self=1-...;Root=<the Root that the lab sent>;...`.
+- But Lambda started its own trace for the function. The variable `_X_AMZN_TRACE_ID` had another `Root`. Lambda does not read the header of an HTTP request.
+- So the segments that Lambda makes (`AWS::Lambda`, `AWS::Lambda::Function`) stay in a trace of their own. To link them, the function would have to send its own segments to the X-Ray daemon by hand. That is what the X-Ray SDK does. AWS put the X-Ray SDKs and the X-Ray daemon in maintenance mode on 2026-02-25. Their support ends on 2027-02-25 ([AWS documentation](https://docs.aws.amazon.com/xray/latest/devguide/xray-daemon-eos.html)).
+
+The lab also saw one more thing. A header that is part of the signature breaks the call: `curl --aws-sigv4` signs every header that it sends. API Gateway then changes `X-Amzn-Trace-Id`, and the signature does not match (403).
+That is why the services add the trace headers after the signing.
+
+**The whole chain.** The lab deployed all four services to `lab-dev` and loaded the web page. A cold page means that all four functions started cold.
+
+| Case | Memory | Cold page | Web, first call | Warm page, median of 5 |
+| --- | --- | --- | --- | --- |
+| Before: Lambda active tracing, no OpenTelemetry (2 samples) | 128 MB | 4.75 s and 4.82 s | 4.34 s | 314 and 339 ms |
+| OpenTelemetry (1 sample; the page shows an error block) | 128 MB | 7.39 s | 6.93 s | 830 ms |
+| OpenTelemetry (2 samples) | 256 MB | 4.14 s and 4.16 s | 3.65 s and 3.75 s | 374 and 391 ms |
+| **OpenTelemetry (2 samples, the choice)** | **512 MB** | **2.67 s and 2.62 s** | **2.00 s and 2.20 s** | **237 and 262 ms** |
+| OpenTelemetry (1 sample) | 1024 MB | 1.92 s | 1.47 s | 233 ms |
+| For comparison: no OpenTelemetry, core, catalogue and account at 512 MB, web at 128 MB (2 samples) | mixed | 1.82 s and 1.38 s | 1.76 s and 1.24 s | 149 and 110 ms |
+
+Every row is one deployment of the four services. The cold page is the first request after the deployment, so all four functions start cold.
+Some samples were lost: a deployment of one service was stopped by its own latency alarm, because the earlier test calls were still slow. The table lists only samples where all four services had the memory of the row. The last row is the exception, and it shows that memory alone brings most of the gain.
+
+At 512 MB, each function took this long for its first request (the init time comes first, and it was 120 to 190 ms for each function):
+
+| Service | First request | Warm request, median |
+| --- | --- | --- |
+| web | 2.0 to 2.2 s | 223 ms |
+| catalogue | 1.25 to 1.29 s | 124 ms |
+| account | 1.20 to 1.27 s | 139 ms |
+| core | 0.45 to 0.47 s | 43 to 52 ms |
+
+What this shows:
+
+- **At 128 MB, tracing would break the page.** The cold chain needs 7.4 s, and web waits only 5 s for each API (lab-platform#17).
+- **At 256 MB, tracing costs what the memory saves.** The cold page takes as long as before the change (4.1 s against 4.8 s), which is already 83 percent of the limit.
+- **At 512 MB, the page is faster than before the change** (2.6 s against 4.8 s cold, 0.25 s against 0.33 s warm). The tracing costs about 1 s of the cold page, and the memory gives back more than 3 s.
+- **1024 MB gains 0.7 s more** and costs twice as much for each millisecond. The lab does not pay for that.
+
+Memory is the right fix here, and not a work-around. Lambda gives CPU in proportion to memory, and the work at the start (loading code, a TLS connection) needs CPU.
+
+#### The trade-off, in short
+
+- The lab pays about 35 to 40 ms for each request, and 512 MB of memory for each function. At the public price of Lambda (USD 0.0000166667 for a GB-second on x86; check the price page) a page view costs about USD 1.56 instead of USD 4.83 per million page views in compute time,
+  from the measured warm durations. The cost of the spans in CloudWatch Logs comes on top, and the lab did not measure it.
+- The lab gets one trace for the whole request, a trace ID in each log line, and no layer from another account.
+- The HTTP API gives no span of its own. In the trace, the time between the client span of the caller and the server span of the next service is the time of API Gateway and of the Lambda call.
+
+#### What a team would revisit
+
+- Where the spans leave the function (see [lab-platform#28](https://github.com/jross24/lab-platform/issues/28)). The export waits on the request path.
+- Who owns Transaction Search and how many spans are sampled and indexed ([lab-platform#27](https://github.com/jross24/lab-platform/issues/27)).
+- The public APIs accept a `traceparent` header from any caller. That is how a trace starts in the middle. A real team may ignore the header at the edge.
+- The lab traces the calls of the code and not the SDK of AWS, because the services call no AWS API. A service that does would add the instrumentation for it.
+
+#### How to see a trace
+
+Take the `traceId` from a log line of any service. Then run:
 
 ```
-aws xray batch-get-traces --trace-ids <traceId> --profile <profile> \
-  --query 'Traces[].Segments[].Document' --output text
+aws xray batch-get-traces --trace-ids <traceId> --profile <profile>
 ```
 
-The AWS documentation gives the sampling rule of Lambda: the first request of each second, and 5 percent of the others. A single test call falls under the first part.
+The result has one document for each server span. The field `parent_id` of a document is the client span of the caller, and that span is in the `subsegments` of the caller.
+In the console, open CloudWatch, then Application Signals, then Transaction Search, and search for the trace ID. Logs Insights on the log group `aws/spans` shows the raw spans.
+
+### The latency threshold
+
+`LatencyAlarm` fires when the p99 duration of the alias `live` is over **1000 ms** in 2 periods of 1 minute in a row.
+The constant `LATENCY_P99_THRESHOLD_MS` in `lib/core-stack.ts` holds the value. The function times out at 3 seconds, and a third of that is 1000 ms.
+
+The lab measured the duration of core in two ways:
+
+| What | When | Result |
+| --- | --- | --- |
+| CloudWatch `Duration` in Production, all calls, before the tracing change (128 MB) | the 12 hours up to 2026-10-07 22:50 UTC | 267 calls: p50 1.4 ms, p95 30 ms, p99 107 ms, slowest 113 ms |
+| The same in Test | the same hours | 284 calls: p50 1.6 ms, p95 52 ms, p99 111 ms, slowest 121 ms |
+| The first request of a new environment, with tracing and 512 MB (lab-dev) | 2026-10-07 | 0.45 to 0.47 s |
+| A warm request, with tracing and 512 MB (lab-dev) | the same day | 43 to 52 ms |
+
+The first request of each new environment takes about 450 ms, because it opens the connection to X-Ray. A new version of the function has new environments.
+So the first call of a canary takes about 450 ms. The value 500 ms would be too near to that, and the lab-dev account showed it: a deployment was stopped by this alarm after a series of cold tests.
+The value 1000 ms is more than twice the first request. A hung call fires it, and a cold start does not. The alarm also needs two minutes in a row.
 
 ### Dashboard
 
@@ -331,10 +462,10 @@ With the switch on, the handler throws on each call.
    Give it the title `fix: drill, inject a fault in production`.
 2. Merge it. The release passes Test (the suite finds no fault there) and Staging, and then waits at `deploy-production`.
 3. Open the dashboard. Approve. Start the traffic loop.
-4. The alias sends 10 percent of the calls to the faulty version. About one call in ten fails. The loop prints `502` for them, because catalogue answers `502` when core fails.
-5. Expect, in this order, within a few minutes (the alarm period is 1 minute, and CloudWatch gets the Lambda metrics after a delay; the lab has not measured the time):
+4. The alias sends 10 percent of the calls to the faulty version. About one call in ten fails. The loop prints `502` for them, because catalogue answers `502` when core fails. A direct call to the private API of core gets `500`.
+5. Expect, in this order, within about one minute (the lab measured 63 seconds in `lab-dev`, see below):
    - `ErrorsAlarm` goes to `ALARM`. The dashboard shows the state, and "Errors of the alias live" shows the errors.
-   - CodeDeploy stops the deployment and moves 100 percent of the traffic back to the old version. The deployment has the state `Stopped` and CodeDeploy starts a rollback deployment.
+   - CodeDeploy stops the deployment and moves 100 percent of the traffic back to the old version. The deployment has the state `Stopped` with the error code `ALARM_ACTIVE`, and CodeDeploy starts a rollback deployment.
    - CloudFormation rolls the stack back. The stack ends in `UPDATE_ROLLBACK_COMPLETE`.
    - The job `deploy-production` **fails** at the step `cdk deploy`. The log names the stack and the failed update.
    - The loop prints `200` again. A signed call to `/items` shows the old version.
@@ -344,7 +475,25 @@ With the switch on, the handler throws on each call.
    - Merge it, wait at `deploy-production`, approve. This release is a good canary.
    - Check: the stack is `UPDATE_COMPLETE`, both alarms are `OK`, and a signed call shows the new version.
 
-The lab has not run this drill. Every statement in step 5 follows from the AWS documentation and not from a run. The drill is the test.
+### What the lab saw in lab-dev
+
+The lab ran this drill in its own account `lab-dev` with the code of this repository. It did not run it in Production: the owner does that.
+The `Dev` stage got the canary configuration and `injectFault: true` for this test only. The test did not change `main`.
+A signed loop called the API every 2 seconds. The times are UTC.
+
+| Time | What happened |
+| --- | --- |
+| 22:46:42 | The stack update started the deployment `d-NH63AODYJ` with the configuration `CodeDeployDefault.LambdaCanary10Percent5Minutes`. The alias sent 10 percent of the calls to the faulty version. |
+| 22:46:49 | The first call failed with `500`. |
+| 22:47:25 | `ErrorsAlarm` was in the state `ALARM` (the first poll that saw it). |
+| 22:47:42 | CodeDeploy stopped the deployment: state `Stopped`, error `ALARM_ACTIVE`. 60 seconds after the start. |
+| 22:47:43 to 22:47:45 | CodeDeploy ran the rollback deployment `d-DRDROADYJ` with `CodeDeployDefault.LambdaAllAtOnce`. It was `Succeeded`. |
+| 22:47:54 | The alias pointed to the old version, with no routing. |
+| after | The stack was `UPDATE_ROLLBACK_COMPLETE`. `cdk deploy` failed with the message that the deployment failed because the alarm `ErrorsAlarm` was active. |
+
+Of 168 calls, 3 failed (`500`), and the rest answered with the old version. The alarm had fired 43 seconds after the start, and the rollback was complete 63 seconds after the start.
+The stop came 17 seconds after the first poll that saw the alarm. The lab did not test how often CodeDeploy reads an alarm.
+The latency alarm and the pipeline job were not part of this test: lab-dev has no pipeline, so `deploy-production` was not run.
 
 ## How a change reaches Production
 
@@ -402,6 +551,9 @@ The `Dev` stage uses the same stack name and the same parameter names as the oth
 So one account can hold only one copy of the service. Use a personal account, not a pipeline account.
 The `Dev` stage has the alias, the deployment group, the alarms and the dashboard too. It releases all at once.
 
+The `Dev` stage also turns on CloudWatch Transaction Search in the account (see "Tracing"). That setting belongs to the whole account.
+The first deployment waits about 6 minutes for it. `cdk destroy` of the stage turns it off again.
+
 ## Layout
 
 | Path | Content |
@@ -411,9 +563,12 @@ The `Dev` stage has the alias, the deployment group, the alarms and the dashboar
 | `lib/stages.ts` | The typed settings of each stage: log retention, the release type and the fault switch. |
 | `lib/core-stage.ts` | The CDK stage. |
 | `lib/core-stack.ts` | The stack: function, API, SSM parameters, outputs. |
-| `lib/gradual-release.ts` | **Copy to a sibling.** The alias, the deployment group, the two alarms and the `Release` type. |
-| `lib/service-dashboard.ts` | **Copy to a sibling.** The dashboard of a stage. |
-| `lib/instrument.ts`, `lib/logger.ts`, `lib/metrics.ts` | **Copy to a sibling.** The wrapper of the handler, the log line and the metric line. |
+| `lib/transaction-search.ts` | Core only. CloudWatch Transaction Search for the whole account: the policy for the log group `aws/spans` and the setting. |
+| `lib/gradual-release.ts` | **Same file in all four repositories.** The alias, the deployment group, the alarms and the `Release` type. |
+| `lib/service-dashboard.ts` | **Same file in all four repositories.** The dashboard of a stage. |
+| `lib/instrument.ts`, `lib/logger.ts`, `lib/metrics.ts` | **Same file in all four repositories.** The wrapper of the handler, the log line and the metric line. |
+| `lib/tracing.ts`, `lib/xray-exporter.ts`, `lib/sigv4.ts` | **Same file in all four repositories.** OpenTelemetry tracing, the export of spans to X-Ray, and the signature of that request. |
+| `lib/function-defaults.ts` | **Same file in all four repositories.** The memory size and the bundling settings of the function. |
 | `lib/items-handler.ts` | The Lambda handler and the fault switch. |
 | `test/` | The unit tests (vitest). |
 | `.github/workflows/` | Three small files that call the workflows in lab-workflows. |
