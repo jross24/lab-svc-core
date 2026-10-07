@@ -10,6 +10,8 @@ export interface LogFields {
   // The X-Ray trace of the request. It links a log line to its trace.
   readonly traceId?: string | undefined;
   readonly error?: string | undefined;
+  // True for the first request of an execution environment. The init time of the function falls on that request.
+  readonly coldStart?: boolean | undefined;
 }
 
 export function levelForStatus(status: number): LogLevel {
@@ -26,7 +28,7 @@ export function roundMs(value: number): number {
 // One request is one line of JSON. CloudWatch Logs Insights then finds each field with no parse rule.
 // The line has no request body, no header and no query string, so it holds no personal data.
 export function formatLogLine(fields: LogFields, now: Date = new Date()): string {
-  const { traceId, error, durationMs, ...rest } = fields;
+  const { traceId, error, durationMs, coldStart, ...rest } = fields;
   return JSON.stringify({
     timestamp: now.toISOString(),
     level: levelForStatus(fields.status),
@@ -34,5 +36,6 @@ export function formatLogLine(fields: LogFields, now: Date = new Date()): string
     durationMs: roundMs(durationMs),
     ...(traceId === undefined ? {} : { traceId }),
     ...(error === undefined ? {} : { error }),
+    ...(coldStart === true ? { coldStart } : {}),
   });
 }

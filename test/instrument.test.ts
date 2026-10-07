@@ -47,6 +47,7 @@ describe('instrument', () => {
       route: 'GET /items',
       status: 200,
       durationMs: 7,
+      coldStart: true,
     });
     expect(parse(lines[1])).toMatchObject({
       service: 'core',
@@ -93,6 +94,52 @@ describe('instrument', () => {
     });
     await wrap(() => Promise.resolve({ statusCode: 200 }))(EVENT, CONTEXT);
     expect(parse(lines[0])).toMatchObject({ traceId: '1-6700aaaa-bbbbbbbbbbbbbbbbbbbbbbbb' });
+  });
+
+  it('marks only the first request of a handler as a cold start', async () => {
+    const { lines, wrap } = setup();
+    const handler = wrap(() => Promise.resolve({ statusCode: 200 }));
+    await handler(EVENT, CONTEXT);
+    await handler(EVENT, CONTEXT);
+    expect(parse(lines[0])).toMatchObject({ coldStart: true });
+    expect(parse(lines[2])).not.toHaveProperty('coldStart');
+  });
+
+  it('counts a new handler as a new cold start, because a new handler is a new execution environment', async () => {
+    const { lines, wrap } = setup();
+    await wrap(() => Promise.resolve({ statusCode: 200 }))(EVENT, CONTEXT);
+    await wrap(() => Promise.resolve({ statusCode: 200 }))(EVENT, CONTEXT);
+    expect(parse(lines[0])).toMatchObject({ coldStart: true });
+    expect(parse(lines[2])).toMatchObject({ coldStart: true });
+  });
+
+  it('writes no coldStart field to the metric line', async () => {
+    const { lines, wrap } = setup();
+    await wrap(() => Promise.resolve({ statusCode: 200 }))(EVENT, CONTEXT);
+    expect(parse(lines[1])).not.toHaveProperty('coldStart');
+  });
+
+  it('marks only the first request of a handler as a cold start', async () => {
+    const { lines, wrap } = setup();
+    const handler = wrap(() => Promise.resolve({ statusCode: 200 }));
+    await handler(EVENT, CONTEXT);
+    await handler(EVENT, CONTEXT);
+    expect(parse(lines[0])).toMatchObject({ coldStart: true });
+    expect(parse(lines[2])).not.toHaveProperty('coldStart');
+  });
+
+  it('counts a new handler as a new cold start, because a new handler is a new execution environment', async () => {
+    const { lines, wrap } = setup();
+    await wrap(() => Promise.resolve({ statusCode: 200 }))(EVENT, CONTEXT);
+    await wrap(() => Promise.resolve({ statusCode: 200 }))(EVENT, CONTEXT);
+    expect(parse(lines[0])).toMatchObject({ coldStart: true });
+    expect(parse(lines[2])).toMatchObject({ coldStart: true });
+  });
+
+  it('writes no coldStart field to the metric line', async () => {
+    const { lines, wrap } = setup();
+    await wrap(() => Promise.resolve({ statusCode: 200 }))(EVENT, CONTEXT);
+    expect(parse(lines[1])).not.toHaveProperty('coldStart');
   });
 
   it('logs the route key of the event', async () => {
