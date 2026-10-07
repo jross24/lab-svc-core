@@ -83,6 +83,10 @@ The second command lists `Test/Core`, `Staging/Core` and `Production/Core`. The 
 - **Two alarms** on the alias. The deployment group watches both.
   - `ErrorsAlarm`: it fires on one error or more in a period of 1 minute.
   - `LatencyAlarm`: it fires when the p99 duration is over 500 ms in 2 periods of 1 minute in a row. The function does almost no work, so a normal call should take a few milliseconds. The lab has not measured this in Lambda yet. The function times out at 3 seconds.
+- A service that answers a failure with a 5xx status, or with a degraded page, and does not throw can switch on a third alarm. Lambda counts a call as an error only when the function throws or times out,
+  so the alarm `ErrorsAlarm` does not see such a call. The option `serviceErrors` of `GradualRelease` adds `ServiceErrorsAlarm`. It reads the metric `errors` that the service writes itself.
+  It watches the version that the stack deploys, so during a canary it sees the errors of the new version and not of the old one. Core does not use it, because core throws when it fails.
+  The siblings `lab-svc-catalogue`, `lab-svc-account` and `lab-web` use it.
 - Both alarms treat missing data as "not breaching". A quiet service sends no data. It must not alarm, and it must not block a deployment.
 - The API integration depends on the invoke permission of the alias. The first release switches a running API from the function to the alias. The order keeps the API up during that switch.
 
@@ -194,6 +198,8 @@ The function writes **one line of JSON for each request**:
 - The field `traceId` is the X-Ray trace of the call. It links a log line to its trace.
 - The field `coldStart` is `true` on the first request of an execution environment, and it is absent on all other lines.
   The init time of the function falls on that request, so a slow line with `coldStart` is a cold start and not a slow code path.
+- The field `degraded` holds a short reason when a handler answered with a good status but handled a failure (a page with an error block). Core never sets it. The sibling `lab-web` does.
+  A degraded call is a warning in the log and an error in the metric. See `Signals` in `lib/instrument.ts`.
 - The module is `lib/logger.ts`. It is a short module, and the service has no logging library.
 - The function writes to stdout directly, and not with `console.log`. In the default text log format, the Lambda runtime adds a time stamp, a request ID and a level before the `console.log` text (the AWS documentation says so). Then the line no longer starts with `{`.
   A direct write is the method that the AWS documentation shows for the embedded metric format. The lab ran this path only on a laptop, with the real bundle. The first release shows if it works in Lambda (see "Metrics and the deployment marker").

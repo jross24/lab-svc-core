@@ -1,6 +1,7 @@
 import type { APIGatewayProxyEventV2, Context } from 'aws-lambda';
 import { describe, expect, it } from 'vitest';
 import { instrument, traceIdOf } from '../lib/instrument.ts';
+import type { Signals } from '../lib/instrument.ts';
 
 const EVENT = { routeKey: 'GET /items' } as APIGatewayProxyEventV2;
 const CONTEXT = { awsRequestId: 'req-42' } as Context;
@@ -9,7 +10,9 @@ function setup(env: Record<string, string | undefined> = {}) {
   const lines: string[] = [];
   // The fake clock moves 7 ms on each read, so a request that reads it twice takes 7 ms.
   let clock = 1000;
-  const wrap = <T extends { statusCode: number }>(handler: () => Promise<T>) =>
+  const wrap = <T extends { statusCode: number }>(
+    handler: (event: APIGatewayProxyEventV2, context: Context, signals: Signals) => Promise<T>,
+  ) =>
     instrument(
       {
         service: 'core',
@@ -140,6 +143,32 @@ describe('instrument', () => {
     const { lines, wrap } = setup();
     await wrap(() => Promise.resolve({ statusCode: 200 }))(EVENT, CONTEXT);
     expect(parse(lines[1])).not.toHaveProperty('coldStart');
+  });
+
+  it('counts a call as an error when the handler reports a degraded answer, also with the status 200', async () => {
+    // A page can render with a failed upstream. The user sees an error block, but the status is 200 and Lambda sees no error.
+    const { lines, wrap } = setup();
+    await wrap((_event, _context, signals) => {
+      signals.degraded = 'catalogue: HTTP 503';
+      return Promise.resolve({ statusCode: 200 });
+    })(EVENT, CONTEXT);
+    expect(parse(lines[0])).toMatchObject({ level: 'WARN', status: 200, degraded: 'catalogue: HTTP 503' });
+    expect(parse(lines[1])).toMatchObject({ requests: 1, errors: 1 });
+  });
+
+  it('gives each call a fresh signals object, so one degraded call does not mark the next call', async () => {
+    const { lines, wrap } = setup();
+    let first = true;
+    const handler = wrap((_event, _context, signals) => {
+      if (first) signals.degraded = 'account: the request timed out';
+      first = false;
+      return Promise.resolve({ statusCode: 200 });
+    });
+    await handler(EVENT, CONTEXT);
+    await handler(EVENT, CONTEXT);
+    expect(parse(lines[1])).toMatchObject({ errors: 1 });
+    expect(parse(lines[3])).toMatchObject({ errors: 0 });
+    expect(parse(lines[2])).not.toHaveProperty('degraded');
   });
 
   it('logs the route key of the event', async () => {

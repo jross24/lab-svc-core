@@ -17,6 +17,12 @@ const ITEMS_PATH = '/items';
 // The latency alarm compares the p99 duration with a threshold far below this limit.
 export const FUNCTION_TIMEOUT = Duration.seconds(3);
 
+// The p99 duration of the function. The function does almost no work, so a normal call should take a few milliseconds.
+// (The lab did not measure this in Lambda yet. Look at the graph "Duration of the alias live" and adjust.)
+// The timeout of the function is 3 seconds. This value is a sixth of the timeout,
+// so the alarm fires on a real fault, and not on one slow call.
+export const LATENCY_P99_THRESHOLD_MS = 500;
+
 export interface CoreStackProps {
   readonly version: string;
   readonly config: StageConfig;
@@ -45,7 +51,11 @@ export class CoreStack extends Stack {
     });
 
     // The alias `live` is what the API calls. CodeDeploy moves the traffic of the alias to each new version.
-    const release = new GradualRelease(this, 'Release', { function: itemsFunction, release: props.config.release });
+    const release = new GradualRelease(this, 'Release', {
+      function: itemsFunction,
+      release: props.config.release,
+      latencyP99ThresholdMs: LATENCY_P99_THRESHOLD_MS,
+    });
     // The lab has no notification target. To page an on-call, make an SNS topic here and add it to the two alarms:
     //   release.errorsAlarm.addAlarmAction(new SnsAction(topic));
     //   release.latencyAlarm.addAlarmAction(new SnsAction(topic));

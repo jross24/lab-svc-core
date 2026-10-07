@@ -25,12 +25,20 @@ export function traceIdOf(env: Env): string | undefined {
   return /(?:^|;)Root=([^;]+)/.exec(env._X_AMZN_TRACE_ID ?? '')?.[1];
 }
 
+// A handler can report a failure that it handled and still answered with a good status. For example, a page can
+// render with an error block because an upstream service failed. The user sees an error, but Lambda sees none.
+// The handler sets "degraded" to a short reason. The wrapper then counts the call as an error and logs the reason.
+export interface Signals {
+  degraded?: string;
+}
+
 // Wraps a handler of an HTTP API (payload format 2.0). For each request it writes one log line and
 // one metric line, also when the handler throws. A thrown error goes on to Lambda, because only
 // then does the Errors metric of Lambda count the call, and that metric is the release gate.
+// The metric line counts an error for a status of 500 or more, and for a call that the handler marked as degraded.
 export function instrument<T extends { readonly statusCode: number }>(
   options: InstrumentOptions,
-  handler: (event: APIGatewayProxyEventV2, context: Context) => Promise<T>,
+  handler: (event: APIGatewayProxyEventV2, context: Context, signals: Signals) => Promise<T>,
 ): (event: APIGatewayProxyEventV2, context: Context) => Promise<T> {
   const read = options.env ?? ((): Env => process.env);
   const write = options.write ?? writeToStdout;
@@ -44,10 +52,11 @@ export function instrument<T extends { readonly statusCode: number }>(
     const coldStart = firstRequest;
     firstRequest = false;
     const started = clock();
+    const signals: Signals = {};
     let status = 500;
     let error: string | undefined;
     try {
-      const response = await handler(event, context);
+      const response = await handler(event, context, signals);
       status = response.statusCode;
       return response;
     } catch (caught) {
@@ -69,13 +78,14 @@ export function instrument<T extends { readonly statusCode: number }>(
             traceId: traceIdOf(env),
             error,
             coldStart,
+            degraded: signals.degraded,
           },
           now(),
         ),
       );
       write(
         formatMetricLine(
-          { service: options.service, version, errors: status >= 500 ? 1 : 0, durationMs },
+          { service: options.service, version, errors: status >= 500 || signals.degraded !== undefined ? 1 : 0, durationMs },
           now(),
         ),
       );

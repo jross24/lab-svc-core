@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { RetentionDays } from 'aws-cdk-lib/aws-logs';
-import { CoreStack, FUNCTION_TIMEOUT } from '../lib/core-stack.ts';
-import { LATENCY_P99_THRESHOLD_MS } from '../lib/gradual-release.ts';
+import { CoreStack, FUNCTION_TIMEOUT, LATENCY_P99_THRESHOLD_MS } from '../lib/core-stack.ts';
 import type { StageConfig } from '../lib/stages.ts';
 
 const ALL_AT_ONCE: StageConfig['release'] = { kind: 'allAtOnce' };

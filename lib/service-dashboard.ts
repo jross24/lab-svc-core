@@ -9,7 +9,6 @@ import {
 } from 'aws-cdk-lib/aws-cloudwatch';
 import { Construct } from 'constructs';
 import type { GradualRelease } from './gradual-release.ts';
-import { LATENCY_P99_THRESHOLD_MS } from './gradual-release.ts';
 import { METRIC_NAMESPACE } from './metrics.ts';
 
 const PERIOD = Duration.minutes(1);
@@ -37,6 +36,12 @@ export class ServiceDashboard extends Construct {
     // a new line by itself, and the code does not name any version.
     const requestsByVersion = new MathExpression({
       expression: `SEARCH('{${METRIC_NAMESPACE},service,version} service="${service}" MetricName="requests"', 'Sum', 60)`,
+      label: '',
+      period: PERIOD,
+    });
+
+    const errorsByVersion = new MathExpression({
+      expression: `SEARCH('{${METRIC_NAMESPACE},service,version} service="${service}" MetricName="errors"', 'Sum', 60)`,
       label: '',
       period: PERIOD,
     });
@@ -81,7 +86,7 @@ export class ServiceDashboard extends Construct {
           alias.metricDuration({ statistic: 'p99', period: PERIOD, label: 'p99' }),
         ],
         leftAnnotations: [
-          { value: LATENCY_P99_THRESHOLD_MS, label: 'p99 alarm threshold', color: '#d62728' },
+          { value: release.latencyP99ThresholdMs, label: 'p99 alarm threshold', color: '#d62728' },
         ],
         leftYAxis: { min: 0, label: 'ms', showUnits: false },
       }),
@@ -95,11 +100,32 @@ export class ServiceDashboard extends Construct {
         ],
         leftYAxis: { min: 0, showUnits: false },
       }),
+    );
+
+    // A service that sets serviceErrors counts its own errors (a 5xx status or a degraded page). Lambda does not.
+    if (release.serviceErrorsAlarm) {
+      this.dashboard.addWidgets(
+        new GraphWidget({
+          title: 'Errors that the service counted, by version',
+          width: HALF,
+          height: HEIGHT,
+          stacked: true,
+          left: [errorsByVersion],
+          leftYAxis: { min: 0, showUnits: false },
+        }),
+      );
+    }
+
+    this.dashboard.addWidgets(
       new AlarmStatusWidget({
         title: 'Alarms: the release gate and the on-call',
         width: FULL,
         height: 3,
-        alarms: [release.errorsAlarm, release.latencyAlarm],
+        alarms: [
+          release.errorsAlarm,
+          release.latencyAlarm,
+          ...(release.serviceErrorsAlarm ? [release.serviceErrorsAlarm] : []),
+        ],
       }),
     );
   }
