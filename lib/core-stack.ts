@@ -1,16 +1,21 @@
 import { fileURLToPath } from 'node:url';
-import { CfnOutput, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import { HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpIamAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
-import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Tracing } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { LogGroup } from 'aws-cdk-lib/aws-logs';
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
+import { GradualRelease } from './gradual-release.ts';
+import { ServiceDashboard } from './service-dashboard.ts';
 import type { StageConfig } from './stages.ts';
 
 const ITEMS_PATH = '/items';
+
+// The latency alarm compares the p99 duration with a threshold far below this limit.
+export const FUNCTION_TIMEOUT = Duration.seconds(3);
 
 export interface CoreStackProps {
   readonly version: string;
@@ -25,23 +30,41 @@ export class CoreStack extends Stack {
     const itemsFunction = new NodejsFunction(this, 'ItemsFunction', {
       entry: fileURLToPath(new URL('./items-handler.ts', import.meta.url)),
       runtime: Runtime.NODEJS_22_X,
-      environment: { VERSION: props.version },
+      timeout: FUNCTION_TIMEOUT,
+      // Lambda sends a segment to X-Ray for each call. The README explains why this is the tracing choice.
+      tracing: Tracing.ACTIVE,
+      environment: {
+        // The version of the release is a part of the function, so each release publishes a new Lambda version.
+        VERSION: props.version,
+        ...(props.config.injectFault ? { INJECT_FAULT: 'true' } : {}),
+      },
       logGroup: new LogGroup(this, 'ItemsFunctionLogs', {
         retention: props.config.logRetentionDays,
         removalPolicy: RemovalPolicy.DESTROY,
       }),
     });
 
+    // The alias `live` is what the API calls. CodeDeploy moves the traffic of the alias to each new version.
+    const release = new GradualRelease(this, 'Release', { function: itemsFunction, release: props.config.release });
+    // The lab has no notification target. To page an on-call, make an SNS topic here and add it to the two alarms:
+    //   release.errorsAlarm.addAlarmAction(new SnsAction(topic));
+    //   release.latencyAlarm.addAlarmAction(new SnsAction(topic));
+    // The same alarms then page the on-call and stop a bad deployment. No other code changes.
+
     const api = new HttpApi(this, 'Api', { description: 'lab-svc-core: mock private API' });
 
     // IAM authorisation makes the API private in effect.
     // API Gateway refuses a request that has no valid AWS signature from a permitted IAM identity.
+    // The integration calls the alias, not the function. The route and the API stay the same, so a consumer
+    // service needs no change: its IAM permission names the API and the route, and not the function.
     api.addRoutes({
       path: ITEMS_PATH,
       methods: [HttpMethod.GET],
-      integration: new HttpLambdaIntegration('ItemsIntegration', itemsFunction),
+      integration: new HttpLambdaIntegration('ItemsIntegration', release.alias),
       authorizer: new HttpIamAuthorizer(),
     });
+
+    new ServiceDashboard(this, 'Dashboard', { service: 'core', release, api });
 
     // A consumer service reads these two parameters to find the API and to write its IAM policy.
     new StringParameter(this, 'UrlParameter', {
