@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { RetentionDays } from 'aws-cdk-lib/aws-logs';
+import { FUNCTION_MEMORY_MB } from '../lib/function-defaults.ts';
 import { CoreStack, FUNCTION_TIMEOUT, LATENCY_P99_THRESHOLD_MS } from '../lib/core-stack.ts';
 import type { StageConfig } from '../lib/stages.ts';
 
@@ -283,31 +284,66 @@ describe('the alarms', () => {
   });
 });
 
+describe('the function settings', () => {
+  const { template } = synth();
+
+  it('has 512 MB of memory, so the first request does not wait for the trace export for long', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', { MemorySize: FUNCTION_MEMORY_MB });
+    expect(FUNCTION_MEMORY_MB).toBe(512);
+  });
+
+  it('uses the handler index.handler of an ES module', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', { Handler: 'index.handler' });
+  });
+});
+
 describe('tracing', () => {
   const { template } = synth();
 
-  it('turns on active tracing of the function', () => {
-    template.hasResourceProperties('AWS::Lambda::Function', { TracingConfig: { Mode: 'Active' } });
+  it('does not turn on active tracing of Lambda, because OpenTelemetry makes the traces', () => {
+    // Active tracing would make a second trace for each call, with another trace ID.
+    const [fn] = Object.values(template.findResources('AWS::Lambda::Function')) as { Properties: { TracingConfig?: unknown } }[];
+    expect(fn?.Properties.TracingConfig).toBeUndefined();
   });
 
-  it('lets the function role send segments to X-Ray', () => {
+  it('lets the function role send spans to X-Ray, and nothing else of X-Ray', () => {
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: ['xray:PutTraceSegments', 'xray:PutTelemetryRecords'],
-            Effect: 'Allow',
-          }),
-        ]),
+        Statement: Match.arrayWith([Match.objectLike({ Action: 'xray:PutTraceSegments', Effect: 'Allow', Resource: '*' })]),
       },
     });
+    expect(JSON.stringify(template.toJSON())).not.toContain('xray:PutTelemetryRecords');
   });
 
-  it('uses no Lambda layer', () => {
+  it('uses no Lambda layer, so no account ID of another publisher is in the template', () => {
     const functions = Object.values(template.findResources('AWS::Lambda::Function')) as {
       Properties: { Layers?: unknown };
     }[];
     expect(functions[0]?.Properties.Layers).toBeUndefined();
+  });
+
+  it('turns on CloudWatch Transaction Search, which the OTLP endpoint of X-Ray needs, and indexes every span', () => {
+    template.resourceCountIs('AWS::XRay::TransactionSearchConfig', 1);
+    template.hasResourceProperties('AWS::XRay::TransactionSearchConfig', { IndexingPercentage: 100 });
+  });
+
+  it('lets X-Ray write the spans into the log group aws/spans of this account and region only', () => {
+    template.resourceCountIs('AWS::Logs::ResourcePolicy', 1);
+    const [policy] = Object.values(template.findResources('AWS::Logs::ResourcePolicy')) as {
+      Properties: { PolicyName: string; PolicyDocument: unknown };
+    }[];
+    const text = JSON.stringify(policy?.Properties.PolicyDocument);
+    expect(text).toContain('xray.amazonaws.com');
+    expect(text).toContain('logs:PutLogEvents');
+    expect(text).toContain('log-group:aws/spans:*');
+    expect(text).toContain('aws:SourceAccount');
+    expect(text).toContain('AWS::AccountId');
+    expect(text).not.toMatch(/[0-9]{12}/);
+  });
+
+  it('creates the log group policy before the Transaction Search configuration', () => {
+    const policyId = Object.keys(template.findResources('AWS::Logs::ResourcePolicy'))[0];
+    template.hasResource('AWS::XRay::TransactionSearchConfig', { DependsOn: [policyId] });
   });
 });
 
