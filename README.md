@@ -94,17 +94,35 @@ The code is in `lib/gradual-release.ts`.
 
 ### How a Production release goes, minute by minute
 
-The times are estimates. The canary step is exactly 5 minutes. The other times depend on the runner and on CloudFormation.
+The times are measured. They come from the release 0.3.0 of core in Production, on 2026-10-07.
+CodeDeploy ran the deployment `d-QWUJ3PCYJ` with the configuration `CodeDeployDefault.LambdaCanary10Percent5Minutes`.
+The times are minutes and seconds after the reviewer approved. The canary step is exactly 5 minutes.
+The other times depend on the runner and on CloudFormation, so another release can differ by some seconds.
 
 | Time | What happens |
 | --- | --- |
 | before 0:00 | The release passed Test (with the end-to-end suite) and Staging. The job `deploy-production` waits for the reviewer. |
-| 0:00 | The reviewer approves. The job starts. |
-| 0:00 to 1:00 | The job installs the CDK, checks the zip against its SHA-256 and starts `cdk deploy`. |
-| about 1:00 | CloudFormation publishes the new Lambda version and moves the alias `live` to it. CodeDeploy starts a deployment. |
-| 1:00 to 6:00 | The alias sends 10 percent of the calls to the new version and 90 percent to the old version. CodeDeploy reads the two alarms during this time. |
-| about 6:00 | No alarm fired. CodeDeploy sends 100 percent of the calls to the new version. |
-| 6:00 to 8:00 | The deployment succeeds. CloudFormation removes the old version and finishes the stack update. The job prints the outputs and ends. |
+| 0:00 | The reviewer approves. |
+| 0:02 | The job starts. |
+| 0:33 | The job has installed the CDK, checked the zip against its SHA-256 and started `cdk deploy`. CloudFormation starts the stack update. |
+| 0:52 | CloudFormation has updated the function and has published the new Lambda version. |
+| 0:54 | CloudFormation starts the update of the alias `live`. CodeDeploy creates the deployment. The alias sends 10 percent of the calls to the new version and 90 percent to the old version. |
+| 0:54 to 5:56 | The canary. CodeDeploy reads the two alarms. No alarm fires. The deployment is `InProgress` for 5 minutes and 2 seconds. |
+| 5:56 | CodeDeploy sends 100 percent of the calls to the new version. The deployment is `Succeeded`. |
+| 5:59 | CloudFormation sees the end of the deployment. The alias update is complete. |
+| 6:01 to 6:03 | CloudFormation deletes the old Lambda version. The stack is `UPDATE_COMPLETE`. |
+| 6:08 | The job prints the outputs and ends. |
+
+The whole release took 6 minutes and 8 seconds after the approval. The first estimate in this README was about 8 minutes.
+Most of the difference was in the last step: the estimate gave 2 minutes for the end, and the real end took 12 seconds.
+
+What the lab saw during the canary:
+
+- `aws lambda get-alias` showed version 1 with `RoutingConfig` `{"2": 0.1}`: 10 percent of the calls went to version 2. After the canary it showed version 2 and no routing.
+- A signed loop called the private API every 2 seconds. The metric `requests` showed **both releases** for 5 minutes (calls in each minute, 0.2.0 / 0.3.0):
+  22 / 4, 22 / 5, 33 / 4, 32 / 1 and 30 / 3. That is 17 of 156 calls (11 percent) for the new release. In the next minute the numbers were 3 / 28, and then 0 / 25.
+- Old version 1 was gone after the release. CloudFormation deletes the old Lambda version in its clean-up step, so a hand rollback is a redeploy of the old release (see "Roll back by hand"), and not a move of the alias.
+- After the release: the stack was `UPDATE_COMPLETE`, both alarms were `OK`, a signed call showed `0.3.0`, an unsigned call got `403`, and the Production web page answered 200 with core `0.3.0`.
 
 Test and Staging use the same steps, but the alias moves to the new version at once.
 
@@ -115,7 +133,8 @@ Test and Staging use the same steps, but the alias moves to the new version at o
 - CodeDeploy cannot read the state of an alarm. The deployment stops.
 
 CodeDeploy reports the failure to CloudFormation. The stack update fails and CloudFormation rolls the stack back.
-Then `cdk deploy` ends with an error, and the job `deploy-production` fails. The lab has not yet run this case. The drill below proves it.
+Then `cdk deploy` ends with an error, and the job `deploy-production` fails.
+The lab ran this case in its own account `lab-dev` (see "What the lab saw in lab-dev" below). It did not run it in Production: the owner runs that drill.
 
 What does not roll a release back:
 
@@ -128,6 +147,8 @@ What does not roll a release back:
 CodeDeploy needs an old version to move traffic from. When the alias does not exist, CloudFormation creates it and starts no deployment.
 So **the first release that contains this change goes to each stage without a canary**. The second release is the first gradual release.
 The drill below starts with a small second release for this reason.
+
+The lab checked this in Production. Before the second release of core, `aws deploy list-deployments` showed no deployment, and the alias pointed to version 1.
 
 ### How to watch a release
 
@@ -331,10 +352,10 @@ With the switch on, the handler throws on each call.
    Give it the title `fix: drill, inject a fault in production`.
 2. Merge it. The release passes Test (the suite finds no fault there) and Staging, and then waits at `deploy-production`.
 3. Open the dashboard. Approve. Start the traffic loop.
-4. The alias sends 10 percent of the calls to the faulty version. About one call in ten fails. The loop prints `502` for them, because catalogue answers `502` when core fails.
-5. Expect, in this order, within a few minutes (the alarm period is 1 minute, and CloudWatch gets the Lambda metrics after a delay; the lab has not measured the time):
+4. The alias sends 10 percent of the calls to the faulty version. About one call in ten fails. The loop prints `502` for them, because catalogue answers `502` when core fails. A direct call to the private API of core gets `500`.
+5. Expect, in this order, within about one minute (the lab measured 63 seconds in `lab-dev`, see below):
    - `ErrorsAlarm` goes to `ALARM`. The dashboard shows the state, and "Errors of the alias live" shows the errors.
-   - CodeDeploy stops the deployment and moves 100 percent of the traffic back to the old version. The deployment has the state `Stopped` and CodeDeploy starts a rollback deployment.
+   - CodeDeploy stops the deployment and moves 100 percent of the traffic back to the old version. The deployment has the state `Stopped` with the error code `ALARM_ACTIVE`, and CodeDeploy starts a rollback deployment.
    - CloudFormation rolls the stack back. The stack ends in `UPDATE_ROLLBACK_COMPLETE`.
    - The job `deploy-production` **fails** at the step `cdk deploy`. The log names the stack and the failed update.
    - The loop prints `200` again. A signed call to `/items` shows the old version.
@@ -344,7 +365,25 @@ With the switch on, the handler throws on each call.
    - Merge it, wait at `deploy-production`, approve. This release is a good canary.
    - Check: the stack is `UPDATE_COMPLETE`, both alarms are `OK`, and a signed call shows the new version.
 
-The lab has not run this drill. Every statement in step 5 follows from the AWS documentation and not from a run. The drill is the test.
+### What the lab saw in lab-dev
+
+The lab ran this drill in its own account `lab-dev` with the code of this repository. It did not run it in Production: the owner does that.
+The `Dev` stage got the canary configuration and `injectFault: true` for this test only. The test did not change `main`.
+A signed loop called the API every 2 seconds. The times are UTC.
+
+| Time | What happened |
+| --- | --- |
+| 22:46:42 | The stack update started the deployment `d-NH63AODYJ` with the configuration `CodeDeployDefault.LambdaCanary10Percent5Minutes`. The alias sent 10 percent of the calls to the faulty version. |
+| 22:46:49 | The first call failed with `500`. |
+| 22:47:25 | `ErrorsAlarm` was in the state `ALARM` (the first poll that saw it). |
+| 22:47:42 | CodeDeploy stopped the deployment: state `Stopped`, error `ALARM_ACTIVE`. 60 seconds after the start. |
+| 22:47:43 to 22:47:45 | CodeDeploy ran the rollback deployment `d-DRDROADYJ` with `CodeDeployDefault.LambdaAllAtOnce`. It was `Succeeded`. |
+| 22:47:54 | The alias pointed to the old version, with no routing. |
+| after | The stack was `UPDATE_ROLLBACK_COMPLETE`. `cdk deploy` failed with the message that the deployment failed because the alarm `ErrorsAlarm` was active. |
+
+Of 168 calls, 3 failed (`500`), and the rest answered with the old version. The alarm had fired 43 seconds after the start, and the rollback was complete 63 seconds after the start.
+The stop came 17 seconds after the first poll that saw the alarm. The lab did not test how often CodeDeploy reads an alarm.
+The latency alarm and the pipeline job were not part of this test: lab-dev has no pipeline, so `deploy-production` was not run.
 
 ## How a change reaches Production
 
