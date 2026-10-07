@@ -154,7 +154,7 @@ describe('the deployment configuration of each stage', () => {
       return JSON.stringify(stack?.template)
         .replace(/"RetentionInDays":[0-9]+/g, '"RetentionInDays":0')
         .replace(/CodeDeployDefault\.Lambda[A-Za-z0-9]+/g, 'CodeDeployDefault.Lambda')
-        .replace(/,"INJECT_FAULT":"true"/g, '')
+        .replace(/"INJECT_FAULT":"true",/g, '')
         .replace(/CurrentVersion[0-9A-F]{8}[0-9a-f]{32}/g, 'CurrentVersion');
     };
     expect(normalised('Staging')).toBe(normalised('Test'));

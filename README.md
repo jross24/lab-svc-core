@@ -82,8 +82,9 @@ The second command lists `Test/Core`, `Staging/Core` and `Production/Core`. The 
   `CodeDeployDefault.LambdaAllAtOnce` in Test and Staging, `CodeDeployDefault.LambdaCanary10Percent5Minutes` in Production.
 - **Two alarms** on the alias. The deployment group watches both.
   - `ErrorsAlarm`: it fires on one error or more in a period of 1 minute.
-  - `LatencyAlarm`: it fires when the p99 duration is over 500 ms in 2 periods of 1 minute in a row. A normal call takes a few milliseconds, and the function times out at 3 seconds.
+  - `LatencyAlarm`: it fires when the p99 duration is over 500 ms in 2 periods of 1 minute in a row. The function does almost no work, so a normal call should take a few milliseconds. The lab has not measured this in Lambda yet. The function times out at 3 seconds.
 - Both alarms treat missing data as "not breaching". A quiet service sends no data. It must not alarm, and it must not block a deployment.
+- The API integration depends on the invoke permission of the alias. The first release switches a running API from the function to the alias. The order keeps the API up during that switch.
 
 The code is in `lib/gradual-release.ts`.
 
@@ -191,9 +192,9 @@ The function writes **one line of JSON for each request**:
 - The level is `INFO` for status below 400, `WARN` for 4xx and `ERROR` for 5xx and for a thrown error. A thrown error adds the field `error`.
 - The line holds no body, no header and no query string.
 - The field `traceId` is the X-Ray trace of the call. It links a log line to its trace.
-- The module is `lib/logger.ts`. It is about 30 lines, and the service has no logging library.
-- The function writes to stdout directly, and not with `console.log`. The Lambda runtime adds a prefix to `console.log` output, and then the line no longer starts with `{`.
-  A direct write reaches CloudWatch Logs as it is. CloudWatch Logs Insights then finds each field.
+- The module is `lib/logger.ts`. It is a short module, and the service has no logging library.
+- The function writes to stdout directly, and not with `console.log`. In the default text log format, the Lambda runtime adds a time stamp, a request ID and a level before the `console.log` text (the AWS documentation says so). Then the line no longer starts with `{`.
+  A direct write is the method that the AWS documentation shows for the embedded metric format. The lab ran this path only on a laptop, with the real bundle. The first release shows if it works in Lambda (see "Metrics and the deployment marker").
 - The stage config sets the retention of the log group (`logRetentionDays`).
 
 An example query in CloudWatch Logs Insights:
@@ -216,6 +217,12 @@ This needs **no new IAM permission**. The function does not call `PutMetricData`
 The dimension `version` is the release. So the graph "Requests by version" is a **deployment marker**.
 It shows the minute when a release first got traffic, the 10 percent step of a canary, and the minute when the old version got its last request.
 The module is `lib/metrics.ts`.
+
+To check that CloudWatch reads the lines after a release, list the metrics. The list is empty until the first request:
+
+```
+aws cloudwatch list-metrics --namespace Lab/Service --profile <profile> --region eu-west-2
+```
 
 The alarms use the native metrics of Lambda (`Errors` and `Duration`) with the dimension `Resource = <function>:live`.
 Native metrics count a failed call even when the function code did not run, for example after a timeout or an out-of-memory error.
@@ -241,7 +248,7 @@ What it does **not** give, and the facts behind this:
 Why not ADOT now:
 
 - **Cold start.** The AWS documentation says that the layer needs more memory and adds cold start time. It gives no figure.
-  User reports for the older layer, which embeds a collector, say 1 to 5 seconds. The lab already uses 3.8 s of the 5 s limit in a cold chain (lab-platform#17).
+  User reports for the older layer, which embeds a collector, say 1 to 5 seconds (for example [aws-otel-lambda issue 228](https://github.com/aws-observability/aws-otel-lambda/issues/228), from 2022). The lab already uses 3.8 s of the 5 s limit in a cold chain (lab-platform#17).
   The lab did not measure the layer. A measurement needs a deployed function.
 - **Memory.** The functions have 128 MB. AWS gives no minimum for the layer. The older layer runs a collector process next to the function, so the function would need more memory.
 - **The layer ARN.** An ADOT layer belongs to an AWS-owned account, and its ARN holds that account ID. I found no SSM parameter that gives the ARN, so the ARN would sit in this public repository.
@@ -262,7 +269,7 @@ aws xray batch-get-traces --trace-ids <traceId> --profile <profile> \
   --query 'Traces[].Segments[].Document' --output text
 ```
 
-X-Ray samples the first request of each second and 5 percent of the others. A single test call is sampled.
+The AWS documentation gives the sampling rule of Lambda: the first request of each second, and 5 percent of the others. A single test call falls under the first part.
 
 ### Dashboard
 
@@ -309,13 +316,15 @@ With the switch on, the handler throws on each call.
 
 1. Make a branch with these two changes in one pull request:
    - In `lib/stages.ts`, set `injectFault: true` in the `Production` block.
-   - In `test/app.test.ts`, change `DRILL_STAGES` to `['Production']`. The test fails by design until you do.
+   - In `test/app.test.ts`, change `DRILL_STAGES` to `['Production']`. The guard test fails by design if you change only one of the two.
+
+   The two edits are the whole change. A dry run with exactly these edits passed lint, typecheck, all the tests and `cdk synth`, and `INJECT_FAULT` appeared only in the Production template.
 
    Give it the title `fix: drill, inject a fault in production`.
 2. Merge it. The release passes Test (the suite finds no fault there) and Staging, and then waits at `deploy-production`.
 3. Open the dashboard. Approve. Start the traffic loop.
 4. The alias sends 10 percent of the calls to the faulty version. About one call in ten fails. The loop prints `502` for them, because catalogue answers `502` when core fails.
-5. Expect, in this order, within about 1 to 3 minutes:
+5. Expect, in this order, within a few minutes (the alarm period is 1 minute, and CloudWatch gets the Lambda metrics after a delay; the lab has not measured the time):
    - `ErrorsAlarm` goes to `ALARM`. The dashboard shows the state, and "Errors of the alias live" shows the errors.
    - CodeDeploy stops the deployment and moves 100 percent of the traffic back to the old version. The deployment has the state `Stopped` and CodeDeploy starts a rollback deployment.
    - CloudFormation rolls the stack back. The stack ends in `UPDATE_ROLLBACK_COMPLETE`.
@@ -394,7 +403,7 @@ The `Dev` stage has the alias, the deployment group, the alarms and the dashboar
 | `lib/stages.ts` | The typed settings of each stage: log retention, the release type and the fault switch. |
 | `lib/core-stage.ts` | The CDK stage. |
 | `lib/core-stack.ts` | The stack: function, API, SSM parameters, outputs. |
-| `lib/gradual-release.ts` | **Copy to a sibling.** The alias, the deployment group and the two alarms. |
+| `lib/gradual-release.ts` | **Copy to a sibling.** The alias, the deployment group, the two alarms and the `Release` type. |
 | `lib/service-dashboard.ts` | **Copy to a sibling.** The dashboard of a stage. |
 | `lib/instrument.ts`, `lib/logger.ts`, `lib/metrics.ts` | **Copy to a sibling.** The wrapper of the handler, the log line and the metric line. |
 | `lib/items-handler.ts` | The Lambda handler and the fault switch. |
