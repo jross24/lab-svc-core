@@ -20,11 +20,11 @@ const ITEMS_PATH = '/items';
 // The latency alarm compares the p99 duration with a threshold far below this limit.
 export const FUNCTION_TIMEOUT = Duration.seconds(3);
 
-// The p99 duration of the function. The function does almost no work, so a normal call should take a few milliseconds.
-// (The lab did not measure this in Lambda yet. Look at the graph "Duration of the alias live" and adjust.)
-// The timeout of the function is 3 seconds. This value is a sixth of the timeout,
-// so the alarm fires on a real fault, and not on one slow call.
-export const LATENCY_P99_THRESHOLD_MS = 500;
+// The p99 duration of the function, in milliseconds. The lab measured it (see "The latency threshold" in the README):
+// a warm call takes about 45 ms with tracing, and the first call of a new environment takes about 450 ms.
+// The alarm must not fire on that first call, so the value is twice the cold call. It is also a third of the
+// timeout of 3 seconds, which is the highest value that the unit test allows.
+export const LATENCY_P99_THRESHOLD_MS = 1000;
 
 export interface CoreStackProps {
   readonly version: string;
