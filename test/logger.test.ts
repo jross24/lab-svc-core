@@ -40,6 +40,14 @@ describe('formatLogLine', () => {
     expect(entry).toMatchObject({ level: 'ERROR', status: 500, traceId: '1-abc-def', error: 'boom' });
   });
 
+  it('adds the field degraded only when there is a reason, and then the level is at least WARN', () => {
+    const degraded = JSON.parse(formatLogLine({ ...FIELDS, degraded: 'catalogue: HTTP 503' }, NOW)) as Record<string, unknown>;
+    expect(degraded).toMatchObject({ level: 'WARN', status: 200, degraded: 'catalogue: HTTP 503' });
+    expect(JSON.parse(formatLogLine(FIELDS, NOW))).not.toHaveProperty('degraded');
+    // A 5xx status stays ERROR.
+    expect(JSON.parse(formatLogLine({ ...FIELDS, status: 502, degraded: 'x' }, NOW))).toMatchObject({ level: 'ERROR' });
+  });
+
   it('adds the field coldStart only for a cold start', () => {
     expect(JSON.parse(formatLogLine({ ...FIELDS, coldStart: true }, NOW))).toMatchObject({ coldStart: true });
     expect(JSON.parse(formatLogLine({ ...FIELDS, coldStart: false }, NOW))).not.toHaveProperty('coldStart');

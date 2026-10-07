@@ -41,6 +41,12 @@ export class ServiceDashboard extends Construct {
       period: PERIOD,
     });
 
+    const errorsByVersion = new MathExpression({
+      expression: `SEARCH('{${METRIC_NAMESPACE},service,version} service="${service}" MetricName="errors"', 'Sum', 60)`,
+      label: '',
+      period: PERIOD,
+    });
+
     this.dashboard = new Dashboard(this, 'Dashboard', {
       dashboardName: `lab-svc-${service}`,
       defaultInterval: Duration.hours(3),
@@ -95,11 +101,32 @@ export class ServiceDashboard extends Construct {
         ],
         leftYAxis: { min: 0, showUnits: false },
       }),
+    );
+
+    // A service that sets serviceErrors counts its own errors (a 5xx status or a degraded page). Lambda does not.
+    if (release.serviceErrorsAlarm) {
+      this.dashboard.addWidgets(
+        new GraphWidget({
+          title: 'Errors that the service counted, by version',
+          width: HALF,
+          height: HEIGHT,
+          stacked: true,
+          left: [errorsByVersion],
+          leftYAxis: { min: 0, showUnits: false },
+        }),
+      );
+    }
+
+    this.dashboard.addWidgets(
       new AlarmStatusWidget({
         title: 'Alarms: the release gate and the on-call',
         width: FULL,
         height: 3,
-        alarms: [release.errorsAlarm, release.latencyAlarm],
+        alarms: [
+          release.errorsAlarm,
+          release.latencyAlarm,
+          ...(release.serviceErrorsAlarm ? [release.serviceErrorsAlarm] : []),
+        ],
       }),
     );
   }

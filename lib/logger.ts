@@ -12,6 +12,8 @@ export interface LogFields {
   readonly error?: string | undefined;
   // True for the first request of an execution environment. The init time of the function falls on that request.
   readonly coldStart?: boolean | undefined;
+  // The reason, when the handler answered with a good status but handled a failure. See Signals in instrument.ts.
+  readonly degraded?: string | undefined;
 }
 
 export function levelForStatus(status: number): LogLevel {
@@ -28,14 +30,16 @@ export function roundMs(value: number): number {
 // One request is one line of JSON. CloudWatch Logs Insights then finds each field with no parse rule.
 // The line has no request body, no header and no query string, so it holds no personal data.
 export function formatLogLine(fields: LogFields, now: Date = new Date()): string {
-  const { traceId, error, durationMs, coldStart, ...rest } = fields;
+  const { traceId, error, durationMs, coldStart, degraded, ...rest } = fields;
   return JSON.stringify({
     timestamp: now.toISOString(),
-    level: levelForStatus(fields.status),
+    // A degraded answer with a good status is a warning. A status of 400 or more keeps its own level.
+    level: degraded !== undefined && fields.status < 400 ? 'WARN' : levelForStatus(fields.status),
     ...rest,
     durationMs: roundMs(durationMs),
     ...(traceId === undefined ? {} : { traceId }),
     ...(error === undefined ? {} : { error }),
     ...(coldStart === true ? { coldStart } : {}),
+    ...(degraded === undefined ? {} : { degraded }),
   });
 }

@@ -1,10 +1,11 @@
 import { Duration } from 'aws-cdk-lib';
-import { Alarm, ComparisonOperator, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
+import { Alarm, ComparisonOperator, Metric, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { LambdaDeploymentConfig, LambdaDeploymentGroup } from 'aws-cdk-lib/aws-codedeploy';
 import type { ILambdaDeploymentConfig } from 'aws-cdk-lib/aws-codedeploy';
 import { Alias } from 'aws-cdk-lib/aws-lambda';
 import type { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
+import { METRIC_NAMESPACE } from './metrics.ts';
 
 // How CodeDeploy moves the traffic of the alias "live" to a new version of the function.
 // Every stage has the same CodeDeploy resources and the same alarms. Only this setting differs.
@@ -38,6 +39,12 @@ export function deploymentConfigOf(release: Release): ILambdaDeploymentConfig {
 export interface GradualReleaseProps {
   readonly function: LambdaFunction;
   readonly release: Release;
+  // Set this for a service that answers a failure with a 5xx status or with a degraded page, and does not throw.
+  // Lambda counts a call as an error only when the function throws or times out. So the alarm on Lambda Errors
+  // does not see a handled failure. This option adds a third alarm on the metric "errors" that the service writes
+  // itself (see metrics.ts). The alarm watches "version", the version that this stack deploys. During a canary it
+  // sees the errors of the new version only, and not the errors of the old version.
+  readonly serviceErrors?: { readonly service: string; readonly version: string };
 }
 
 // The alias `live` of a function, the CodeDeploy deployment group that moves its traffic, and the two alarms
@@ -50,6 +57,8 @@ export class GradualRelease extends Construct {
   readonly alias: Alias;
   readonly errorsAlarm: Alarm;
   readonly latencyAlarm: Alarm;
+  // Only for a service that sets serviceErrors.
+  readonly serviceErrorsAlarm?: Alarm;
   readonly deploymentGroup: LambdaDeploymentGroup;
 
   constructor(scope: Construct, id: string, props: GradualReleaseProps) {
@@ -85,11 +94,30 @@ export class GradualRelease extends Construct {
       treatMissingData: TreatMissingData.NOT_BREACHING,
     });
 
+    if (props.serviceErrors) {
+      const { service, version } = props.serviceErrors;
+      // The metric exists after the first request of the version. Until then the alarm has no data, and no data is not a breach.
+      this.serviceErrorsAlarm = new Alarm(this, 'ServiceErrorsAlarm', {
+        alarmDescription: `The version ${version} of ${service} counted an error in the last minute (a 5xx status or a degraded page). This alarm also stops a deployment.`,
+        metric: new Metric({
+          namespace: METRIC_NAMESPACE,
+          metricName: 'errors',
+          dimensionsMap: { service, version },
+          statistic: 'Sum',
+          period: PERIOD,
+        }),
+        threshold: 1,
+        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        evaluationPeriods: 1,
+        treatMissingData: TreatMissingData.NOT_BREACHING,
+      });
+    }
+
     // The default rollback settings roll back when the deployment fails and when an alarm fires.
     this.deploymentGroup = new LambdaDeploymentGroup(this, 'DeploymentGroup', {
       alias: this.alias,
       deploymentConfig: deploymentConfigOf(props.release),
-      alarms: [this.errorsAlarm, this.latencyAlarm],
+      alarms: [this.errorsAlarm, this.latencyAlarm, ...(this.serviceErrorsAlarm ? [this.serviceErrorsAlarm] : [])],
     });
   }
 }
