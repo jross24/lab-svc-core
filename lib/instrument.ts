@@ -36,8 +36,13 @@ export function instrument<T extends { readonly statusCode: number }>(
   const write = options.write ?? writeToStdout;
   const clock = options.clock ?? ((): number => performance.now());
   const now = options.now ?? ((): Date => new Date());
+  // Lambda loads the module one time for each execution environment, so this wrapper lives as long as the
+  // environment. Its first request is the cold start.
+  let firstRequest = true;
 
   return async (event, context) => {
+    const coldStart = firstRequest;
+    firstRequest = false;
     const started = clock();
     let status = 500;
     let error: string | undefined;
@@ -63,6 +68,7 @@ export function instrument<T extends { readonly statusCode: number }>(
             durationMs,
             traceId: traceIdOf(env),
             error,
+            coldStart,
           },
           now(),
         ),

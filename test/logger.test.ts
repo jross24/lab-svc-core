@@ -40,6 +40,12 @@ describe('formatLogLine', () => {
     expect(entry).toMatchObject({ level: 'ERROR', status: 500, traceId: '1-abc-def', error: 'boom' });
   });
 
+  it('adds the field coldStart only for a cold start', () => {
+    expect(JSON.parse(formatLogLine({ ...FIELDS, coldStart: true }, NOW))).toMatchObject({ coldStart: true });
+    expect(JSON.parse(formatLogLine({ ...FIELDS, coldStart: false }, NOW))).not.toHaveProperty('coldStart');
+    expect(JSON.parse(formatLogLine(FIELDS, NOW))).not.toHaveProperty('coldStart');
+  });
+
   it('rounds the duration to three decimals', () => {
     const entry = JSON.parse(formatLogLine({ ...FIELDS, durationMs: 1.23456789 }, NOW)) as { durationMs: number };
     expect(entry.durationMs).toBe(1.235);

@@ -192,6 +192,8 @@ The function writes **one line of JSON for each request**:
 - The level is `INFO` for status below 400, `WARN` for 4xx and `ERROR` for 5xx and for a thrown error. A thrown error adds the field `error`.
 - The line holds no body, no header and no query string.
 - The field `traceId` is the X-Ray trace of the call. It links a log line to its trace.
+- The field `coldStart` is `true` on the first request of an execution environment, and it is absent on all other lines.
+  The init time of the function falls on that request, so a slow line with `coldStart` is a cold start and not a slow code path.
 - The module is `lib/logger.ts`. It is a short module, and the service has no logging library.
 - The function writes to stdout directly, and not with `console.log`. In the default text log format, the Lambda runtime adds a time stamp, a request ID and a level before the `console.log` text (the AWS documentation says so). Then the line no longer starts with `{`.
   A direct write is the method that the AWS documentation shows for the embedded metric format. The lab ran this path only on a laptop, with the real bundle. The first release shows if it works in Lambda (see "Metrics and the deployment marker").
