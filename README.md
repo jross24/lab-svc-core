@@ -503,11 +503,16 @@ The latency alarm and the pipeline job were not part of this test: lab-dev has n
 2. Merge the pull request. The `release` workflow starts.
 3. The workflow works out the next version from the commit titles and creates the tag, for example `v0.2.0`.
 4. The workflow builds one time: one `cdk synth -c version=<version>`. It stores the zipped `cdk.out` in a GitHub release.
-5. The workflow deploys that same zip to Test, then to Staging. In both, CodeDeploy moves the traffic at once.
-6. The workflow waits. A reviewer approves the `production` environment in GitHub. Then the workflow deploys the same zip to Production. CodeDeploy moves 10 percent of the traffic, waits 5 minutes, and moves the rest.
+5. The workflow takes the lock of Test. It checks the deployment order, deploys that same zip to Test, and runs the end-to-end suite. The suite also checks that Test reports the version of the release. The workflow records the four versions that passed as `tested-with.json` on the GitHub release.
+6. The workflow checks the order and the tested set again in Staging, deploys the zip there, and runs the smoke subset of the suite. CodeDeploy moves the traffic at once in Test and in Staging.
+7. The workflow waits. A reviewer approves the `production` environment in GitHub. A newer release that reaches this point cancels an older release that still waits. After the approval the workflow checks again, deploys the same zip to Production, and runs the smoke subset. CodeDeploy moves 10 percent of the traffic, waits 5 minutes, and moves the rest.
+   If the smoke subset fails, the job fails and a redeploy of the earlier version waits for the reviewer.
+
+The file `pipeline.json` names this service and the services that it needs. Core needs none. The consumers (catalogue and account) need core, so the pipeline checks their order against the version of core in the environment.
+A release of core is also compared with the tested set: Staging and Production must run at least the versions of the other services that the suite tested with this release, unless `pipeline.json` accepts older ones.
 
 No deploy job builds again. The lab-workflows README explains how the pipeline proves this.
-It also lists the time limit of each job. `deploy-production` has 30 minutes.
+It also lists the time limit of each job. `deploy-production` has 40 minutes: 30 for the deployment and 10 for the checks and the smoke subset.
 
 ### Commit titles choose the version
 
