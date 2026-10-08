@@ -224,6 +224,56 @@ The lab ran these steps in `lab-dev` on 2026-10-08, on a copy with the namespace
 The restore needed no change of the stack. The window of point in time recovery starts when the feature is switched on and ends about 5 minutes before now.
 So a restore to a time in the last 5 minutes fails, and a restore of a table that is a few minutes old has a very small window.
 
+### A data change in two releases
+
+This section is the short version of "Migrations", "The rollback floor" and "Restore". The example is the rename of `name` to `title`.
+
+**Why two releases.** A rollback restores code, not data. The previous version of the code must read the data that the new version leaves.
+This holds during the canary, and after a rollback. One release that adds `title` and removes `name` would break the previous version.
+
+**Release 1: expand.**
+
+- An `expand` migration adds the new attribute. `0002-add-title` copies `name` into `title`. It removes nothing.
+- The handler returns both `name` and `title`. A service with a request body also accepts both. Old code still works.
+- `minRollbackVersion` in `pipeline.json` stays as it is, because a rollback to the previous version is safe.
+- The release attaches `contract.json` to its GitHub release. After Production, it also attaches `deployed-production.json`.
+- Consumers move to `title` while this release runs.
+
+**Release 2: contract.**
+
+- A `contract` migration removes the old attribute. The handler returns only `title`.
+- `pipeline.json` raises `minRollbackVersion` to the version of release 1. Code from before release 1 can not read the data any more.
+- Start this release only when no consumer reads `name`. The pull request check `pr / contracts` fails when a pull request removes a field
+  that the Production contract still has.
+
+**The order of the migrations and the canary.** The order is fixed by dependencies in `lib/core-stack.ts`.
+
+1. Expand migrations run first, before the alias moves.
+2. The canary runs. In Production it sends 10 percent of the traffic to the new version for 5 minutes, then all of it.
+3. Contract migrations run after the canary has finished.
+4. `/lab/core/version` changes. The release is complete.
+
+If an alarm stops the canary, CodeDeploy moves the alias back. The contract migration never ran, so no data was destroyed.
+
+**The rollback floor.** The SSM parameter `/lab/core/min-rollback-version` holds the oldest version that can still read the data. Each environment has its own.
+
+- A contract migration writes the floor before its first change of data. The migration step never lowers the floor.
+- The workflow `redeploy.yml` reads the floor after the Test lock and before the deployment.
+- If the version to deploy is below the floor, `redeploy` stops with "Rollback refused". It changes nothing.
+- The canary rollback of CodeDeploy does not use `redeploy`. It is safe because the contract migration runs after the canary.
+
+**Restore from point in time recovery.** A rollback does not bring data back. Point in time recovery is on in every stage, and it can.
+
+1. Pick a time just before the harm. The latest time is about 5 minutes ago.
+2. Run `aws dynamodb restore-table-to-point-in-time` with `--source-table-name`, `--target-table-name` and `--restore-date-time`.
+   A restore creates a NEW table. It never overwrites the live table. The new table has no point in time recovery, no deletion protection and no tags.
+3. Look at the new table. Compare it with what you expect.
+4. Run `node scripts/copy-table.ts <restored table> <live table>`. The script reads every row of the new table, items and ledger, and writes it into the live table.
+   It overwrites a row with the same id. It keeps a row that exists only in the live table. It does not restore anything by itself.
+5. Delete the restored table.
+
+A restore does not change the code and it does not lower the rollback floor.
+
 ## Gradual release
 
 ### What the stack makes
