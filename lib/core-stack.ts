@@ -106,6 +106,17 @@ export class CoreStack extends Stack {
       stringValue: api.arnForExecuteApi(HttpMethod.GET, ITEMS_PATH),
     });
 
+    // The pipeline of the other services reads this parameter. It checks the deployment order and the set of tested versions.
+    const versionParameter = new StringParameter(this, 'VersionParameter', {
+      parameterName: '/lab/core/version',
+      description: 'Version of core that this stack runs',
+      stringValue: props.version,
+    });
+    // CloudFormation updates the alias, then waits for the CodeDeploy deployment (canary in Production), and only then
+    // updates this parameter. So the parameter shows the new version when the release is complete.
+    // A rollback of the traffic leaves the old version in the parameter.
+    versionParameter.node.addDependency(release.alias);
+
     // The pipeline reads Version after a deployment. Do not add an output that contains the account ID:
     // the deploy job prints the outputs to a public log.
     new CfnOutput(this, 'Version', { value: props.version });

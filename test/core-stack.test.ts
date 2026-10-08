@@ -90,7 +90,31 @@ describe('CoreStack', () => {
         ],
       },
     });
-    template.resourceCountIs('AWS::SSM::Parameter', 2);
+    template.resourceCountIs('AWS::SSM::Parameter', 3);
+  });
+
+  it('writes the version to the SSM parameter /lab/core/version', () => {
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/lab/core/version',
+      Type: 'String',
+      Value: '1.2.3',
+    });
+  });
+
+  it('waits for the alias before it writes the version, so the parameter shows the version of a complete release', () => {
+    // CloudFormation waits for the CodeDeploy deployment of the alias. Then it updates the parameter.
+    const aliasId = onlyKey(template.findResources('AWS::Lambda::Alias'));
+    template.hasResource('AWS::SSM::Parameter', {
+      Properties: { Name: '/lab/core/version' },
+      DependsOn: Match.arrayWith([aliasId]),
+    });
+  });
+
+  it('writes a new version to the SSM parameter /lab/core/version when the version changes', () => {
+    synth('1.2.4').template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/lab/core/version',
+      Value: '1.2.4',
+    });
   });
 
   it('reports the version and the API URL as stack outputs', () => {
