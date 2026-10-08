@@ -531,13 +531,15 @@ A function that gets a bad value anyway samples all requests, because a trace th
 - The function role needs one more permission: `xray:PutTraceSegments` on `*`. X-Ray actions do not support a resource. It is the only X-Ray action.
 - Lambda active tracing is **off**. With both, each call would make two traces with different IDs.
 
-#### Why Transaction Search, and why core turns it on
+#### Why Transaction Search, and who owns it
 
 The endpoint accepts spans only when CloudWatch Transaction Search is on. The setting belongs to the whole account and the whole region.
 Then X-Ray writes each span as a log event into the log group `aws/spans`, and indexes a part of the spans as traces that `aws xray batch-get-traces` finds.
 
 `lib/transaction-search.ts` turns it on with two resources: a policy of CloudWatch Logs that lets X-Ray write into `aws/spans` of this account, and `AWS::XRay::TransactionSearchConfig` with 100 percent indexing.
-Core owns the setting, because core deploys first and the platform stack has no pipeline. See [lab-platform#27](https://github.com/jross24/lab-platform/issues/27).
+The setting is moving to the platform stack of [lab-platform](https://github.com/jross24/lab-platform) ([lab-platform#27](https://github.com/jross24/lab-platform/issues/27)).
+Until the move ends, core still has the two resources, and both have `DeletionPolicy: Retain`. The next core release removes them from this stack, and the real policy and the real setting stay in the account.
+A release of core that takes the resources out of the stack without `Retain` would delete them, and the delete switches tracing off for all four services.
 The first deployment waits until the setting is active. This took 6 minutes in the lab-dev account. So the job `deploy-test` has a limit of 15 minutes now.
 
 #### What was measured
@@ -814,7 +816,7 @@ An account holds one baseline copy, and it stays deployed. To run a second copy,
 The `Dev` stage has the alias, the deployment group, the alarms and the dashboard too. It releases all at once.
 
 The baseline copy also turns on CloudWatch Transaction Search in the account (see "Tracing"). That setting belongs to the whole account.
-The first deployment waits about 6 minutes for it. `cdk destroy` of the baseline copy turns it off again.
+The first deployment waits about 6 minutes for it. Both resources have `DeletionPolicy: Retain`, so `cdk destroy` of the baseline copy leaves the setting on.
 
 ### Namespaces
 
@@ -850,8 +852,7 @@ Nothing else of the stack has a fixed name. CloudFormation builds the other name
 A unit test compares all Name-like properties of two namespaces. It fails when a new fixed name appears.
 
 **Transaction Search.** A copy with a namespace does not create CloudWatch Transaction Search. The setting belongs to the whole account.
-The policy has the fixed name `lab-xray-can-write-spans`. A second copy would collide with it.
-`cdk destroy` of a preview would also switch tracing off for the whole account. Only the baseline copy owns the setting.
+The policy has the fixed name `lab-xray-can-write-spans`. A second copy would collide with it. Only the baseline copy has the two resources.
 
 **The consumers.** A consumer service reads `/lab/core/url` and `/lab/core/api-arn` by default. So a consumer still calls the baseline copy.
 A copy of core with a namespace is for a consumer that names it with a context value (`coreNamespace` in the consumer). The consumers do not have that value yet.

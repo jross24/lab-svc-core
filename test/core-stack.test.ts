@@ -397,6 +397,14 @@ describe('tracing', () => {
     expect(text).not.toMatch(/[0-9]{12}/);
   });
 
+  it('keeps both resources when the stack or the resource goes away, so the setting can move to the platform stack', () => {
+    // lab-platform#27: a delete of the configuration switches tracing off for all services of the account.
+    // Retain also lets a later release remove the resources from this stack and leave them in the account.
+    for (const type of ['AWS::XRay::TransactionSearchConfig', 'AWS::Logs::ResourcePolicy']) {
+      template.hasResource(type, { DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain' });
+    }
+  });
+
   it('creates the log group policy before the Transaction Search configuration', () => {
     const policyId = Object.keys(template.findResources('AWS::Logs::ResourcePolicy'))[0];
     template.hasResource('AWS::XRay::TransactionSearchConfig', { DependsOn: [policyId] });
