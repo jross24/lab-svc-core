@@ -12,7 +12,10 @@ import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 import { FUNCTION_BUNDLING, FUNCTION_MEMORY_MB } from './function-defaults.ts';
 import { GradualRelease } from './gradual-release.ts';
+import { ItemsTable } from './items-table.ts';
+import { Migrations } from './migrations-resource.ts';
 import { NAMESPACE_TAG, namesFor } from './namespace.ts';
+import { readDeclaredFloor } from './pipeline-file.ts';
 import { ServiceDashboard } from './service-dashboard.ts';
 import { TransactionSearch } from './transaction-search.ts';
 import type { StageConfig } from './stages.ts';
@@ -46,6 +49,9 @@ export class CoreStack extends Stack {
     // The tag goes to the stack and to every resource that can have a tag. A copy with no namespace has no tag.
     if (props.namespace !== undefined) Tags.of(this).add(NAMESPACE_TAG, props.namespace);
 
+    // The data: the table, and the migration step that fills it and changes its shape. The README section "Data" explains both.
+    const { table } = new ItemsTable(this, 'Items', { retain: props.config.retainData });
+
     const itemsFunction = new NodejsFunction(this, 'ItemsFunction', {
       entry: fileURLToPath(new URL('./items-handler.ts', import.meta.url)),
       runtime: Runtime.NODEJS_22_X,
@@ -56,6 +62,7 @@ export class CoreStack extends Stack {
       environment: {
         // The version of the release is a part of the function, so each release publishes a new Lambda version.
         VERSION: props.version,
+        TABLE_NAME: table.tableName,
         ...(props.config.injectFault ? { INJECT_FAULT: 'true' } : {}),
       },
       logGroup: new LogGroup(this, 'ItemsFunctionLogs', {
@@ -63,6 +70,9 @@ export class CoreStack extends Stack {
         removalPolicy: RemovalPolicy.DESTROY,
       }),
     });
+
+    // The function reads the items. It never writes them: only the migration step writes.
+    table.grantReadData(itemsFunction);
 
     // The function sends its spans to the OTLP endpoint of X-Ray. The endpoint checks this permission.
     // X-Ray actions do not support a resource, so the resource is *.
@@ -78,6 +88,23 @@ export class CoreStack extends Stack {
       release: props.config.release,
       latencyP99ThresholdMs: LATENCY_P99_THRESHOLD_MS,
     });
+    // The order of the data steps in one deployment (the README section "Data" explains it):
+    //   1. expand migrations   (additive, old code still works),
+    //   2. the alias moves to the new code, and CodeDeploy runs the canary (CloudFormation waits for it),
+    //   3. contract migrations (destructive, old code stops working),
+    //   4. the version parameter says that the release is complete.
+    // An alarm in step 2 rolls the alias back and fails the update. Then step 3 never runs, and the data is not destroyed.
+    const migrations = new Migrations(this, 'Migrations', {
+      table,
+      version: props.version,
+      declaredFloor: readDeclaredFloor(),
+      floorParameterName: names.floorParameterName,
+      retain: props.config.retainData,
+      logRetentionDays: props.config.logRetentionDays,
+    });
+    release.alias.node.addDependency(migrations.expand);
+    migrations.contract.node.addDependency(release.alias);
+
     // The lab has no notification target. To page an on-call, make an SNS topic here and add it to the two alarms:
     //   release.errorsAlarm.addAlarmAction(new SnsAction(topic));
     //   release.latencyAlarm.addAlarmAction(new SnsAction(topic));
@@ -134,6 +161,8 @@ export class CoreStack extends Stack {
     // updates this parameter. So the parameter shows the new version when the release is complete.
     // A rollback of the traffic leaves the old version in the parameter.
     versionParameter.node.addDependency(release.alias);
+    // The release is complete only after the contract step. If that step fails, the parameter keeps the old version.
+    versionParameter.node.addDependency(migrations.contract);
 
     // The pipeline reads Version after a deployment. Do not add an output that contains the account ID:
     // the deploy job prints the outputs to a public log.

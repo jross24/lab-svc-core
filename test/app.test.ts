@@ -29,10 +29,16 @@ function stackIds(assembly: CloudAssembly): string[] {
   return assembly.stacksRecursively.map((stack) => stack.hierarchicalId).sort();
 }
 
+// The code of the function that serves GET /items. It is the function with the variable VERSION.
+// The stack has two more functions: the migration function and the framework function of the custom resources.
 function lambdaCode(assembly: CloudAssembly): unknown[] {
   return assembly.stacksRecursively.flatMap((stack) =>
     Object.values(templateOf(stack).Resources)
-      .filter((resource) => resource.Type === 'AWS::Lambda::Function')
+      .filter(
+        (resource) =>
+          resource.Type === 'AWS::Lambda::Function' &&
+          (resource.Properties as { Environment?: { Variables?: Record<string, unknown> } } | undefined)?.Environment?.Variables?.VERSION !== undefined,
+      )
       .map((resource) => resource.Properties?.Code),
   );
 }
@@ -171,14 +177,16 @@ describe('the deployment configuration of each stage', () => {
   it('is the only difference between the templates of the stages, apart from the stage config', () => {
     // Test must exercise the resources that Production runs. So the stages must differ only in the stage config:
     // the log retention, the deployment configuration, and the fault switch of the drill with the id of the
-    // Lambda version that the switch changes.
+    // Lambda version that the switch changes. The description of the framework function holds the path of the
+    // construct, and the path holds the name of the stage.
     const normalised = (stage: string): string => {
       const stack = assembly.stacksRecursively.find((candidate) => candidate.hierarchicalId === `${stage}/Core`);
       return JSON.stringify(stack?.template)
         .replace(/"RetentionInDays":[0-9]+/g, '"RetentionInDays":0')
         .replace(/CodeDeployDefault\.Lambda[A-Za-z0-9]+/g, 'CodeDeployDefault.Lambda')
         .replace(/"INJECT_FAULT":"true",/g, '')
-        .replace(/CurrentVersion[0-9A-F]{8}[0-9a-f]{32}/g, 'CurrentVersion');
+        .replace(/CurrentVersion[0-9A-F]{8}[0-9a-f]{32}/g, 'CurrentVersion')
+        .replace(/\((Test|Staging|Production|Dev)\/Core\/Migrations\/Provider\)/g, '(Stage/Core/Migrations/Provider)');
     };
     expect(normalised('Staging')).toBe(normalised('Test'));
     expect(normalised('Production')).toBe(normalised('Test'));

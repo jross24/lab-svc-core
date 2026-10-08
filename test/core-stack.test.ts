@@ -6,15 +6,28 @@ import { FUNCTION_MEMORY_MB } from '../lib/function-defaults.ts';
 import { CoreStack, FUNCTION_TIMEOUT, LATENCY_P99_THRESHOLD_MS } from '../lib/core-stack.ts';
 import type { StageConfig } from '../lib/stages.ts';
 
+// The template tests do not read the bundled code, so esbuild does not need to run for each synth.
+const NO_BUNDLING = { 'aws:cdk:bundling-stacks': [] };
 const ALL_AT_ONCE: StageConfig['release'] = { kind: 'allAtOnce' };
 const CANARY: StageConfig['release'] = { kind: 'canary', percent: 10, minutes: 5 };
 
 function synth(version = '1.2.3', config: Partial<StageConfig> = {}) {
-  const stack = new CoreStack(new App(), 'Core', {
+  const stack = new CoreStack(new App({ context: NO_BUNDLING }), 'Core', {
     version,
-    config: { logRetentionDays: RetentionDays.ONE_WEEK, release: ALL_AT_ONCE, injectFault: false, ...config },
+    config: { logRetentionDays: RetentionDays.ONE_WEEK, release: ALL_AT_ONCE, injectFault: false, retainData: true, ...config },
   });
   return { stack, template: Template.fromStack(stack) };
+}
+
+// The logical id of the function that serves GET /items. It is the function with the variable VERSION.
+// The stack has two more functions: the migration function and the framework function of the custom resources.
+function itemsFunctionId(template: Template): string {
+  const found = Object.entries(template.findResources('AWS::Lambda::Function')).filter(
+    ([, resource]) =>
+      (resource as { Properties: { Environment?: { Variables?: Record<string, unknown> } } }).Properties.Environment?.Variables?.VERSION !== undefined,
+  );
+  expect(found).toHaveLength(1);
+  return found[0]?.[0] ?? '';
 }
 
 function onlyKey(resources: Record<string, unknown>): string {
@@ -32,12 +45,14 @@ describe('CoreStack', () => {
     expect(stack.resolve(stack.region)).toEqual({ Ref: 'AWS::Region' });
   });
 
-  it('has one Node.js 22 function that gets the version from the environment', () => {
-    template.resourceCountIs('AWS::Lambda::Function', 1);
+  it('has one Node.js 22 function that serves the items and gets the version from the environment', () => {
+    // Two more functions belong to the migration step. test/data-store.test.ts covers them.
+    template.resourceCountIs('AWS::Lambda::Function', 3);
     template.hasResourceProperties('AWS::Lambda::Function', {
       Runtime: 'nodejs22.x',
       Environment: { Variables: { VERSION: '1.2.3' } },
     });
+    expect(itemsFunctionId(template)).toBeTruthy();
   });
 
   it('keeps the logs for the number of days in the stage config', () => {
@@ -134,7 +149,8 @@ describe('the alias live', () => {
   const aliasId = onlyKey(template.findResources('AWS::Lambda::Alias'));
 
   it('points at one published version of the function', () => {
-    const functionId = onlyKey(template.findResources('AWS::Lambda::Function'));
+    const functionId = itemsFunctionId(template);
+    template.resourceCountIs('AWS::Lambda::Version', 1);
     template.hasResourceProperties('AWS::Lambda::Version', { FunctionName: { Ref: functionId } });
     template.hasResourceProperties('AWS::Lambda::Alias', {
       Name: 'live',
@@ -326,8 +342,9 @@ describe('tracing', () => {
 
   it('does not turn on active tracing of Lambda, because OpenTelemetry makes the traces', () => {
     // Active tracing would make a second trace for each call, with another trace ID.
-    const [fn] = Object.values(template.findResources('AWS::Lambda::Function')) as { Properties: { TracingConfig?: unknown } }[];
-    expect(fn?.Properties.TracingConfig).toBeUndefined();
+    const functions = Object.values(template.findResources('AWS::Lambda::Function')) as { Properties: { TracingConfig?: unknown } }[];
+    expect(functions).toHaveLength(3);
+    for (const fn of functions) expect(fn.Properties.TracingConfig).toBeUndefined();
   });
 
   it('lets the function role send spans to X-Ray, and nothing else of X-Ray', () => {
@@ -343,7 +360,8 @@ describe('tracing', () => {
     const functions = Object.values(template.findResources('AWS::Lambda::Function')) as {
       Properties: { Layers?: unknown };
     }[];
-    expect(functions[0]?.Properties.Layers).toBeUndefined();
+    expect(functions).toHaveLength(3);
+    for (const fn of functions) expect(fn.Properties.Layers).toBeUndefined();
   });
 
   it('turns on CloudWatch Transaction Search, which the OTLP endpoint of X-Ray needs, and indexes every span', () => {
@@ -374,9 +392,9 @@ describe('tracing', () => {
 describe('the fault switch', () => {
   it('sets no INJECT_FAULT variable when the stage config does not inject a fault', () => {
     const functions = Object.values(synth().template.findResources('AWS::Lambda::Function')) as {
-      Properties: { Environment: { Variables: Record<string, unknown> } };
+      Properties: { Environment?: { Variables: Record<string, unknown> } };
     }[];
-    expect(functions[0]?.Properties.Environment.Variables).not.toHaveProperty('INJECT_FAULT');
+    for (const fn of functions) expect(fn.Properties.Environment?.Variables ?? {}).not.toHaveProperty('INJECT_FAULT');
   });
 
   it('sets INJECT_FAULT to true when the stage config injects a fault', () => {
@@ -432,7 +450,7 @@ describe('the dashboard', () => {
     expect(found, title).toBeDefined();
     return found as Widget;
   };
-  const functionId = onlyKey(template.findResources('AWS::Lambda::Function'));
+  const functionId = itemsFunctionId(template);
   const apiId = onlyKey(template.findResources('AWS::ApiGatewayV2::Api'));
 
   it('is one dashboard with a fixed name', () => {

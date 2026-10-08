@@ -35,7 +35,7 @@ export class MemoryStore implements DataPort, LedgerPort, FloorPort {
   removeAttribute(id: string, attribute: string): Promise<void> {
     this.calls.push(`remove ${id}.${attribute}`);
     const item = this.items.get(id);
-    if (item) delete item[attribute];
+    if (item) Reflect.deleteProperty(item, attribute);
     return Promise.resolve();
   }
 

@@ -1,0 +1,31 @@
+{
+  "service": "core",
+  "consumers": ["catalogue", "account"],
+  "endpoints": {
+    "GET /items": {
+      "request": { "required": [], "optional": [] },
+      "responses": {
+        "200": {
+          "type": "object",
+          "required": ["service", "version", "items"],
+          "properties": {
+            "service": { "type": "string", "description": "The name of the service. Always core." },
+            "version": { "type": "string", "description": "The version of the release that answered." },
+            "items": {
+              "type": "array",
+              "description": "All the items of the table, in the order of their ids.",
+              "items": {
+                "type": "object",
+                "required": ["id", "name"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "name": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
