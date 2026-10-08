@@ -1,26 +1,48 @@
 {
   "service": "core",
-  "consumers": ["catalogue", "account"],
+  "consumers": [
+    "catalogue",
+    "account"
+  ],
   "endpoints": {
     "GET /items": {
-      "request": { "required": [], "optional": [] },
+      "request": {
+        "required": [],
+        "optional": []
+      },
       "responses": {
         "200": {
           "type": "object",
-          "required": ["service", "version", "items"],
+          "required": [
+            "service",
+            "version",
+            "items"
+          ],
           "properties": {
-            "service": { "type": "string", "description": "The name of the service. Always core." },
-            "version": { "type": "string", "description": "The version of the release that answered." },
+            "service": {
+              "type": "string",
+              "description": "The name of the service. Always core."
+            },
+            "version": {
+              "type": "string",
+              "description": "The version of the release that answered."
+            },
             "items": {
               "type": "array",
               "description": "All the items of the table, in the order of their ids.",
               "items": {
                 "type": "object",
-                "required": ["id", "name", "title"],
+                "required": [
+                  "id",
+                  "title"
+                ],
                 "properties": {
-                  "id": { "type": "string" },
-                  "name": { "type": "string", "description": "The old name of title. It stays until all consumers read title." },
-                  "title": { "type": "string" }
+                  "id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
                 }
               }
             }
