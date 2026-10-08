@@ -311,7 +311,7 @@ describe('an invalid namespace', () => {
       () =>
         new CoreStack(new App(), 'Core', {
           version: '1.2.3',
-          config: { logRetentionDays: RetentionDays.ONE_WEEK, release: { kind: 'allAtOnce' }, injectFault: false, retainData: false },
+          config: { logRetentionDays: RetentionDays.ONE_WEEK, release: { kind: 'allAtOnce' }, injectFault: false, retainData: false, traceSampleRatio: 1 },
           namespace: 'Bad-Name',
         }),
     ).toThrow(/namespace must be 1 to 20 characters/);

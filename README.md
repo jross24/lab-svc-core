@@ -55,11 +55,13 @@ Each stage holds one stack, `lab-svc-core`. The file `lib/stages.ts` holds the s
 | `release` | all at once | all at once | canary: 10 percent, then 100 percent after 5 minutes |
 | `injectFault` | false | false | false |
 | `retainData` | true | true | true |
+| `traceSampleRatio` | 1 | 1 | 1 |
 
 Every stage has the same resources: the same alias, the same CodeDeploy deployment group, the same alarms and the same dashboard.
 Only the values in the table differ. So Test runs what Production runs. A unit test checks this: it compares the three templates.
 
 `injectFault` is a device for the release drill. See "The Production drill". No stage sets it in `main`.
+`traceSampleRatio` is the share of new traces that are sampled. See "The export stays on the request path, and the sampling ratio" in the Tracing section.
 
 The code names no AWS account and no region. A stack goes to the account of the credentials that deploy it.
 The pipeline gives each deploy job the credentials of one account. So `Test/*` goes to the Test account, and so on.
@@ -474,8 +476,45 @@ Every service writes the same trace ID in its JSON log line. This is the goal of
 1. Each service has a server span for each request. The call to the next service is a client span.
 2. The caller puts the W3C header `traceparent` on the call. The next service reads it and continues the trace.
 3. At the end of each request, the service signs one HTTPS call and sends all its spans to X-Ray (the OTLP endpoint). This needs CloudWatch Transaction Search in the account.
+   A request that is not sampled makes no call (see "The export stays on the request path, and the sampling ratio").
 4. The cost: 512 MB of memory instead of 128 MB, about 35 to 40 ms for each request, and about 430 ms for the first request of a new environment.
    The cold page still became faster than before (2.6 s against 4.8 s), because the memory also gives more CPU.
+
+#### The export stays on the request path, and the sampling ratio
+
+The owner decided that the export of the spans stays on the request path, with 512 MB of memory ([lab-platform#28](https://github.com/jross24/lab-platform/issues/28)).
+The answer of a request waits for one signed call to X-Ray. At 512 MB this costs about 35 ms for a warm request.
+The lab accepts this cost, because the other ways cost more than they give here (the ADOT layer adds about 700 ms to each cold start, and an extension is more code in four services).
+
+The lab measured the cost with one function, 5 cold starts and 15 warm calls for each size. The first request pays for the TLS connection to X-Ray. The warm request pays for one signed HTTPS call.
+
+| Memory | First request after a cold start | Warm request (p50) |
+| --- | --- | --- |
+| 128 MB | 1918 ms (plain function: 112 ms) | 164 ms (plain function: 1.6 ms) |
+| 256 MB | 944 ms | 64 ms |
+| **512 MB (chosen)** | **448 ms (plain function: 16 ms)** | **37 ms** |
+| 1024 MB | 244 ms | 34 ms |
+
+What changed is the sampling. A request that is not sampled makes no call to X-Ray, so it does not pay the cost. The share of sampled requests is a setting of each stage.
+
+**How to set the ratio.** `traceSampleRatio` in `lib/stages.ts` is a number from 0 to 1 for each stage.
+The value 1 samples all requests, and every stage has it today. The value 0.1 samples one new trace in ten.
+`lib/core-stack.ts` writes the number into the variable `TRACE_SAMPLE_RATIO` of the function (`tracingEnvironment` in `lib/function-defaults.ts`). `createDefaultTracing` in `lib/tracing.ts` reads it.
+To change the ratio, edit the number and open a pull request. The pipeline deploys it like any other change. A number outside 0 to 1 stops `cdk synth`.
+A function that gets a bad value anyway samples all requests, because a trace that is lost costs more than a trace that is not needed.
+
+**How the sampler decides.** It is a parent-based sampler with a trace-ID ratio sampler for the root.
+
+- A request with a `traceparent` header follows its caller. The last field of the header is the flag: `01` is sampled and `00` is not.
+  A sampled parent is always followed, also with ratio 0. A parent that is not sampled is never sampled, also with ratio 1.
+- A request with no parent is sampled by its trace ID. The sampler keeps the share of IDs that the ratio names.
+- Web starts the trace of a page request, so the ratio of web decides for the whole chain. The other services follow the header.
+  The public APIs accept a `traceparent` header from any caller, and a header with the flag `01` forces a sample.
+- A request that is not sampled records no span, and the end of the request makes no call to X-Ray. The unit tests in `test/tracing.test.ts` prove it:
+  ratio 0 gives no call to the exporter, and ratio 1 gives one.
+- The log line keeps the trace ID, also when the request is not sampled. X-Ray then has no trace for this ID, and `aws xray batch-get-traces` returns nothing.
+  The log lines of the services still share the ID, so Logs Insights can follow the request.
+- The release gate uses the metrics of Lambda and the metric line of each request, and not the traces. A ratio below 1 does not change the gate.
 
 #### How it works
 
@@ -581,7 +620,8 @@ Memory is the right fix here, and not a work-around. Lambda gives CPU in proport
 
 #### What a team would revisit
 
-- Where the spans leave the function (see [lab-platform#28](https://github.com/jross24/lab-platform/issues/28)). The export waits on the request path.
+- Where the spans leave the function. The export waits on the request path, and the owner accepted the cost ([lab-platform#28](https://github.com/jross24/lab-platform/issues/28)).
+  A team that cannot pay about 35 ms for each request would sample fewer requests first (the ratio above), and then look at a layer or an extension.
 - Who owns Transaction Search and how many spans are sampled and indexed ([lab-platform#27](https://github.com/jross24/lab-platform/issues/27)).
 - The public APIs accept a `traceparent` header from any caller. That is how a trace starts in the middle. A real team may ignore the header at the edge.
 - The lab traces the calls of the code and not the SDK of AWS, because the services call no AWS API. A service that does would add the instrumentation for it.
@@ -837,7 +877,7 @@ The shared dashboard code always names the dashboard `lab-svc-core`. So the stac
 | `lib/service-dashboard.ts` | **Same file in all four repositories.** The dashboard of a stage. |
 | `lib/instrument.ts`, `lib/logger.ts`, `lib/metrics.ts` | **Same file in all four repositories.** The wrapper of the handler, the log line and the metric line. |
 | `lib/tracing.ts`, `lib/xray-exporter.ts`, `lib/sigv4.ts` | **Same file in all four repositories.** OpenTelemetry tracing, the export of spans to X-Ray, and the signature of that request. |
-| `lib/function-defaults.ts` | **Same file in all four repositories.** The memory size and the bundling settings of the function. |
+| `lib/function-defaults.ts` | **Same file in all four repositories.** The memory size, the bundling settings and the sampling-ratio setting of the function. |
 | `lib/items-handler.ts` | The Lambda handler and the fault switch. It reads the items from the table. |
 | `lib/items-table.ts` | The DynamoDB table and its settings. |
 | `lib/migrations/` | The migration runner (`runner.ts`), its types, the version helper, the migration scripts (`0001-seed-items.ts`) and the list (`list.ts`). |

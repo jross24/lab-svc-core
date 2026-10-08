@@ -10,7 +10,7 @@ import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { LogGroup } from 'aws-cdk-lib/aws-logs';
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
-import { FUNCTION_BUNDLING, FUNCTION_MEMORY_MB } from './function-defaults.ts';
+import { FUNCTION_BUNDLING, FUNCTION_MEMORY_MB, tracingEnvironment } from './function-defaults.ts';
 import { GradualRelease } from './gradual-release.ts';
 import { ItemsTable } from './items-table.ts';
 import { Migrations } from './migrations-resource.ts';
@@ -63,6 +63,8 @@ export class CoreStack extends Stack {
         // The version of the release is a part of the function, so each release publishes a new Lambda version.
         VERSION: props.version,
         TABLE_NAME: table.tableName,
+        // The share of the requests that make a trace. The setting of the stage is in stages.ts.
+        ...tracingEnvironment(props.config.traceSampleRatio),
         ...(props.config.injectFault ? { INJECT_FAULT: 'true' } : {}),
       },
       logGroup: new LogGroup(this, 'ItemsFunctionLogs', {

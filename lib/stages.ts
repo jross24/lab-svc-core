@@ -12,17 +12,21 @@ export interface StageConfig {
   // false: `cdk destroy` removes the table. Only the Dev stage (a laptop copy or a preview) is false. It has no data
   // that matters, and a preview must not leave a table behind. See "Data" in the README.
   readonly retainData: boolean;
+  // The share of the new traces that are sampled, from 0 to 1. A request with a traceparent header follows its caller.
+  // 1 samples all requests. See "Tracing" in the README for the cost.
+  readonly traceSampleRatio: number;
 }
 
 // The pipeline deploys these stages. Each stage goes to its own AWS account.
 export const STAGES = {
-  Test: { logRetentionDays: RetentionDays.ONE_WEEK, release: { kind: 'allAtOnce' }, injectFault: false, retainData: true },
-  Staging: { logRetentionDays: RetentionDays.ONE_WEEK, release: { kind: 'allAtOnce' }, injectFault: false, retainData: true },
+  Test: { logRetentionDays: RetentionDays.ONE_WEEK, release: { kind: 'allAtOnce' }, injectFault: false, retainData: true, traceSampleRatio: 1 },
+  Staging: { logRetentionDays: RetentionDays.ONE_WEEK, release: { kind: 'allAtOnce' }, injectFault: false, retainData: true, traceSampleRatio: 1 },
   Production: {
     logRetentionDays: RetentionDays.ONE_MONTH,
     release: { kind: 'canary', percent: 10, minutes: 5 },
     injectFault: false,
     retainData: true,
+    traceSampleRatio: 1,
   },
 } as const satisfies Record<string, StageConfig>;
 
@@ -32,4 +36,5 @@ export const DEV_STAGE: StageConfig = {
   release: { kind: 'allAtOnce' },
   injectFault: false,
   retainData: false,
+  traceSampleRatio: 1,
 };
