@@ -851,8 +851,12 @@ The names that the namespace changes:
 | SSM parameter with the URL | `/lab/core/url` | `/lab/ns/<ns>/core/url` | `/lab/ns/pr-12/core/url` |
 | SSM parameter with the API ARN | `/lab/core/api-arn` | `/lab/ns/<ns>/core/api-arn` | `/lab/ns/pr-12/core/api-arn` |
 | SSM parameter with the version | `/lab/core/version` | `/lab/ns/<ns>/core/version` | `/lab/ns/pr-12/core/version` |
+| SSM parameter with the rollback floor | `/lab/core/min-rollback-version` | `/lab/ns/<ns>/core/min-rollback-version` | `/lab/ns/pr-12/core/min-rollback-version` |
 | Dashboard name | `lab-svc-core` | `lab-svc-core-<ns>` | `lab-svc-core-pr-12` |
 | Tag on the stack and its resources | none | `lab-namespace=<ns>` | `lab-namespace=pr-12` |
+
+The migration step writes the rollback floor, not CloudFormation. So the parameter is not a resource of the stack, but each copy has its own name for it.
+Each copy has its own table, because the table has no fixed name. In the `Dev` stage, `cdk destroy` removes the table and the floor parameter of the copy. See "The table".
 
 Nothing else of the stack has a fixed name. CloudFormation builds the other names from the stack name, so they are unique too.
 A unit test compares all Name-like properties of two namespaces. It fails when a new fixed name appears.
@@ -860,13 +864,27 @@ A unit test compares all Name-like properties of two namespaces. It fails when a
 **Transaction Search.** No copy of core creates CloudWatch Transaction Search. The platform stack owns the setting of the whole account, with the fixed policy name `lab-xray-can-write-spans`.
 
 **The consumers.** A consumer service reads `/lab/core/url` and `/lab/core/api-arn` by default. So a consumer still calls the baseline copy.
-A copy of core with a namespace is for a consumer that names it with a context value (`coreNamespace` in the consumer). The consumers do not have that value yet.
+A copy of core with a namespace is for a consumer that names it with a context value (`coreNamespace` in the consumer). The consumer then reads `/lab/ns/<core namespace>/core/url` and `/lab/ns/<core namespace>/core/api-arn`. The consumers do not have that value yet.
 
 **The version.** Give each copy its own `version`. The default `0.0.0-dev` belongs to the baseline copy.
 The pipeline uses a version such as `0.0.0-pr12.abc1234`.
 
 The code is in `lib/namespace.ts`. It does not change the nine shared files.
 The shared dashboard code always names the dashboard `lab-svc-core`. So the stack sets the new name on the `CfnDashboard` with `addPropertyOverride`.
+
+### The preview of a pull request
+
+A pull request with the label `preview` gets its own copy of core in the developer account.
+The workflow `.github/workflows/preview.yml` calls the shared workflow of lab-workflows. It deploys the `Dev` stage under the namespace `pr-<number>`, for example `pr-12`.
+
+- The stack is `lab-svc-core-pr-12`. It has its own table and its own parameters under `/lab/ns/pr-12/core/`.
+- The API is private, and so an unsigned call to `GET <URL>/items` gets HTTP 403. The smoke test of the workflow expects 403. That answer shows that the API is up and that the route has its authorization. A missing route would give 404.
+- A push to the pull request deploys the new commit to the same stack.
+- When the pull request closes, or when you remove the label, the workflow runs `cdk destroy` on the stack. The table and the floor parameter go with it. A scheduled workflow removes any copy that stays behind.
+- The baseline copy of core, its table and its parameters are not touched. The consumers still read `/lab/core/url` and `/lab/core/api-arn`.
+
+The README of [lab-workflows](https://github.com/jross24/lab-workflows#the-temporary-environment-of-a-pull-request) explains the jobs and the security note.
+A person with write access can deploy anything to the developer account with this label. The account is the fence, see that README.
 
 ## Layout
 
@@ -894,4 +912,4 @@ The shared dashboard code always names the dashboard `lab-svc-core`. So the stac
 | `contract.json` | What the service promises in its answers. See "Contract tests" in the README of lab-workflows. |
 | `pipeline.json` | The name of the service, the providers it needs, and `minRollbackVersion`. |
 | `test/` | The unit tests (vitest). `test/support/` holds the in-memory store and the helper for the contract. |
-| `.github/workflows/` | Three small files that call the workflows in lab-workflows. |
+| `.github/workflows/` | Four small files that call the workflows in lab-workflows: `pr.yml`, `preview.yml`, `redeploy.yml` and `release.yml`. |
