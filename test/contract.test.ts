@@ -73,8 +73,8 @@ describe('the answer of GET /items', () => {
 
   it('has the shape of the contract for a table with items', async () => {
     const body = await answer([
-      { id: 'item-1', name: 'First item', title: 'First item' },
-      { id: 'item-2', name: 'Second item', title: 'Second item' },
+      { id: 'item-1', title: 'First item' },
+      { id: 'item-2', title: 'Second item' },
     ]);
     expect(validate(schema, body)).toEqual([]);
   });
@@ -84,7 +84,7 @@ describe('the answer of GET /items', () => {
   });
 
   it('would not pass the check if the handler dropped a field of the contract (the test can fail)', () => {
-    expect(validate(schema, { service: 'core', version: '1.2.3', items: [{ id: 'item-1', name: 'First item' }] })).toEqual([
+    expect(validate(schema, { service: 'core', version: '1.2.3', items: [{ id: 'item-1' }] })).toEqual([
       '$.items[0].title: required property is missing',
     ]);
   });

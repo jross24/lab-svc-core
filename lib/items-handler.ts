@@ -21,15 +21,12 @@ function failOnPurpose(): void {
 }
 
 // The shape of an item in the answer. The README section "Data" explains how this changes in two releases.
-// This release is the EXPAND step of the rename of "name" to "title". It reads either attribute and returns both,
-// so the previous version (which reads "name") and the next version (which reads "title") can both work with the data.
-// An item with neither attribute is a fault in the data. The handler throws, so Lambda counts an error and the alarms see it.
-function toItem(row: ItemRecord): { readonly id: string; readonly name: string; readonly title: string } {
-  const name = typeof row.name === 'string' ? row.name : undefined;
-  const title = typeof row.title === 'string' ? row.title : undefined;
-  const value = title ?? name;
-  if (value === undefined) throw new Error(`The item ${row.id} has neither the attribute name nor the attribute title.`);
-  return { id: row.id, name: name ?? value, title: title ?? value };
+// This release is the CONTRACT step of the rename of "name" to "title". It reads and returns only "title".
+// The data of the previous version (the EXPAND release) has both attributes during the canary, so this code reads it.
+// An item without a title is a fault in the data. The handler throws, so Lambda counts an error and the alarms see it.
+function toItem(row: ItemRecord): { readonly id: string; readonly title: string } {
+  if (typeof row.title !== 'string') throw new Error(`The item ${row.id} has no attribute title.`);
+  return { id: row.id, title: row.title };
 }
 
 export function createItemsHandler(readItems: ReadItems): (event: APIGatewayProxyEventV2, context: Context) => Promise<JsonResponse> {
