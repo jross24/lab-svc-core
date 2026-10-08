@@ -1,4 +1,4 @@
-import { Aws, Stack } from 'aws-cdk-lib';
+import { Aws, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import { CfnResourcePolicy } from 'aws-cdk-lib/aws-logs';
 import { CfnTransactionSearchConfig } from 'aws-cdk-lib/aws-xray';
 import { Construct } from 'constructs';
@@ -10,8 +10,14 @@ import { Construct } from 'constructs';
 // `aws xray batch-get-traces` and the X-Ray console can find.
 //
 // This setting belongs to the whole account and not to one service. All four services send spans to the same
-// endpoint, so one of them must own the setting. Core owns it, because core deploys first.
-// The platform stack (lab-platform) would be the better owner, but it has no pipeline yet (lab-platform#23).
+// endpoint. The platform stack (lab-platform) is the right owner, and the setting is moving there (lab-platform#27).
+// Core owned it until now, because core deploys first.
+//
+// Both resources have a fixed identity in the account, so two stacks cannot own them at the same time.
+// The move has two core releases. This release keeps both resources when they leave the stack (Retain).
+// The next release removes them from the stack. The real policy and the real setting stay in the account.
+// Then the platform stack imports them. Without Retain, the removal would delete the setting and switch tracing
+// off for all four services.
 //
 // The first deployment waits until the setting is active. In the lab-dev account this took 6 minutes.
 export class TransactionSearch extends Construct {
@@ -42,10 +48,12 @@ export class TransactionSearch extends Construct {
         ],
       }),
     });
+    policy.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
     // 100 percent of the spans become traces that the X-Ray API can find. The lab has little traffic.
     // A real team lowers this value: AWS indexes 1 percent for free and charges for the rest.
     const config = new CfnTransactionSearchConfig(this, 'Config', { indexingPercentage: 100 });
+    config.applyRemovalPolicy(RemovalPolicy.RETAIN);
     config.addDependency(policy);
   }
 }
