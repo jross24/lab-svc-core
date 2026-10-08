@@ -14,7 +14,7 @@ const CANARY: StageConfig['release'] = { kind: 'canary', percent: 10, minutes: 5
 function synth(version = '1.2.3', config: Partial<StageConfig> = {}) {
   const stack = new CoreStack(new App({ context: NO_BUNDLING }), 'Core', {
     version,
-    config: { logRetentionDays: RetentionDays.ONE_WEEK, release: ALL_AT_ONCE, injectFault: false, retainData: true, ...config },
+    config: { logRetentionDays: RetentionDays.ONE_WEEK, release: ALL_AT_ONCE, injectFault: false, retainData: true, traceSampleRatio: 1, ...config },
   });
   return { stack, template: Template.fromStack(stack) };
 }
@@ -53,6 +53,20 @@ describe('CoreStack', () => {
       Environment: { Variables: { VERSION: '1.2.3' } },
     });
     expect(itemsFunctionId(template)).toBeTruthy();
+  });
+
+  it('samples every request by default: the function gets TRACE_SAMPLE_RATIO=1', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', { Environment: { Variables: { VERSION: '1.2.3', TRACE_SAMPLE_RATIO: '1' } } });
+  });
+
+  it('gives the function the sampling ratio of the stage config', () => {
+    synth('1.2.3', { traceSampleRatio: 0.25 }).template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: { VERSION: '1.2.3', TRACE_SAMPLE_RATIO: '0.25' } },
+    });
+  });
+
+  it('stops the synth when the sampling ratio of the stage is not from 0 to 1', () => {
+    expect(() => synth('1.2.3', { traceSampleRatio: 2 })).toThrow(/sampling ratio/);
   });
 
   it('keeps the logs for the number of days in the stage config', () => {
