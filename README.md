@@ -554,12 +554,59 @@ npx cdk destroy -c dev=true "Dev/*" --profile <your-dev-profile>
 The profile selects the account. The account must be bootstrapped (`npx cdk bootstrap --profile <your-dev-profile>`).
 The version is `0.0.0-dev` unless you add `-c version=<version>`.
 
-The `Dev` stage uses the same stack name and the same parameter names as the other stages.
-So one account can hold only one copy of the service. Use a personal account, not a pipeline account.
+With no other context value, the `Dev` stage is the **baseline copy** of the account. It uses the same stack name and the same parameter names as the pipeline stages.
+The consumer services of the account read `/lab/core/url` and `/lab/core/api-arn`, so they call the baseline copy.
+An account holds one baseline copy, and it stays deployed. To run a second copy, use a namespace.
 The `Dev` stage has the alias, the deployment group, the alarms and the dashboard too. It releases all at once.
 
-The `Dev` stage also turns on CloudWatch Transaction Search in the account (see "Tracing"). That setting belongs to the whole account.
-The first deployment waits about 6 minutes for it. `cdk destroy` of the stage turns it off again.
+The baseline copy also turns on CloudWatch Transaction Search in the account (see "Tracing"). That setting belongs to the whole account.
+The first deployment waits about 6 minutes for it. `cdk destroy` of the baseline copy turns it off again.
+
+### Namespaces
+
+A namespace gives a copy of the `Dev` stage names of its own. So a second copy can live in the same account and not touch the baseline copy.
+Use it for a copy on your laptop. The pipeline uses it for the preview of a pull request.
+
+```
+npx cdk deploy -c dev=true -c namespace=my-test -c version=0.0.0-my-test "Dev/*" --profile <your-dev-profile>
+npx cdk destroy -c dev=true -c namespace=my-test "Dev/*" --profile <your-dev-profile>
+```
+
+The rules for the context value `namespace` are the same in all services:
+
+- It is valid only together with `dev=true`. With `dev` off, the app stops with an error.
+- It has 1 to 20 characters. The first character is a letter from `a` to `z`.
+- The other characters are the letters `a` to `z`, the digits `0` to `9` and `-`. The last character is not `-`.
+- The app stops with an error for any other value. The message shows the value and an example.
+- The pipeline stages never read it.
+- The namespace `pr-<number>` belongs to the pipeline. Do not use a name that starts with `pr-` on a laptop.
+
+The names that the namespace changes:
+
+| | No namespace (baseline copy) | Namespace `<ns>` | Example, namespace `pr-12` |
+| --- | --- | --- | --- |
+| Stack name | `lab-svc-core` | `lab-svc-core-<ns>` | `lab-svc-core-pr-12` |
+| SSM parameter with the URL | `/lab/core/url` | `/lab/ns/<ns>/core/url` | `/lab/ns/pr-12/core/url` |
+| SSM parameter with the API ARN | `/lab/core/api-arn` | `/lab/ns/<ns>/core/api-arn` | `/lab/ns/pr-12/core/api-arn` |
+| SSM parameter with the version | `/lab/core/version` | `/lab/ns/<ns>/core/version` | `/lab/ns/pr-12/core/version` |
+| Dashboard name | `lab-svc-core` | `lab-svc-core-<ns>` | `lab-svc-core-pr-12` |
+| Tag on the stack and its resources | none | `lab-namespace=<ns>` | `lab-namespace=pr-12` |
+
+Nothing else of the stack has a fixed name. CloudFormation builds the other names from the stack name, so they are unique too.
+A unit test compares all Name-like properties of two namespaces. It fails when a new fixed name appears.
+
+**Transaction Search.** A copy with a namespace does not create CloudWatch Transaction Search. The setting belongs to the whole account.
+The policy has the fixed name `lab-xray-can-write-spans`. A second copy would collide with it.
+`cdk destroy` of a preview would also switch tracing off for the whole account. Only the baseline copy owns the setting.
+
+**The consumers.** A consumer service reads `/lab/core/url` and `/lab/core/api-arn` by default. So a consumer still calls the baseline copy.
+A copy of core with a namespace is for a consumer that names it with a context value (`coreNamespace` in the consumer). The consumers do not have that value yet.
+
+**The version.** Give each copy its own `version`. The default `0.0.0-dev` belongs to the baseline copy.
+The pipeline uses a version such as `0.0.0-pr12.abc1234`.
+
+The code is in `lib/namespace.ts`. It does not change the nine shared files.
+The shared dashboard code always names the dashboard `lab-svc-core`. So the stack sets the new name on the `CfnDashboard` with `addPropertyOverride`.
 
 ## Layout
 
@@ -569,6 +616,7 @@ The first deployment waits about 6 minutes for it. `cdk destroy` of the stage tu
 | `lib/app.ts` | Reads the context values and makes the stages. |
 | `lib/stages.ts` | The typed settings of each stage: log retention, the release type and the fault switch. |
 | `lib/core-stage.ts` | The CDK stage. |
+| `lib/namespace.ts` | The context value `namespace`: the check of the value and the names of a copy. |
 | `lib/core-stack.ts` | The stack: function, API, SSM parameters, outputs. |
 | `lib/transaction-search.ts` | Core only. CloudWatch Transaction Search for the whole account: the policy for the log group `aws/spans` and the setting. |
 | `lib/gradual-release.ts` | **Same file in all four repositories.** The alias, the deployment group, the alarms and the `Release` type. |

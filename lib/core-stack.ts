@@ -1,8 +1,9 @@
 import { fileURLToPath } from 'node:url';
-import { CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { CfnOutput, Duration, RemovalPolicy, Stack, Tags } from 'aws-cdk-lib';
 import { CfnIntegration, HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpIamAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import type { CfnDashboard } from 'aws-cdk-lib/aws-cloudwatch';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { CfnPermission, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -11,6 +12,7 @@ import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 import { FUNCTION_BUNDLING, FUNCTION_MEMORY_MB } from './function-defaults.ts';
 import { GradualRelease } from './gradual-release.ts';
+import { NAMESPACE_TAG, namesFor } from './namespace.ts';
 import { ServiceDashboard } from './service-dashboard.ts';
 import { TransactionSearch } from './transaction-search.ts';
 import type { StageConfig } from './stages.ts';
@@ -29,12 +31,20 @@ export const LATENCY_P99_THRESHOLD_MS = 1000;
 export interface CoreStackProps {
   readonly version: string;
   readonly config: StageConfig;
+  // Only the Dev stage sets it (the context value `namespace`). It gives the stack, the three SSM parameters and the
+  // dashboard names of their own, so that several copies of the service can live in one account.
+  // With no namespace the stack has the names of the baseline copy. See "Namespaces" in the README.
+  readonly namespace?: string;
 }
 
 export class CoreStack extends Stack {
   constructor(scope: Construct, id: string, props: CoreStackProps) {
+    const names = namesFor(props.namespace);
     // No env here: the stack takes the account and the region of the credentials that deploy it.
-    super(scope, id, { stackName: 'lab-svc-core' });
+    super(scope, id, { stackName: names.stackName });
+
+    // The tag goes to the stack and to every resource that can have a tag. A copy with no namespace has no tag.
+    if (props.namespace !== undefined) Tags.of(this).add(NAMESPACE_TAG, props.namespace);
 
     const itemsFunction = new NodejsFunction(this, 'ItemsFunction', {
       entry: fileURLToPath(new URL('./items-handler.ts', import.meta.url)),
@@ -58,7 +68,9 @@ export class CoreStack extends Stack {
     // X-Ray actions do not support a resource, so the resource is *.
     itemsFunction.addToRolePolicy(new PolicyStatement({ actions: ['xray:PutTraceSegments'], resources: ['*'] }));
     // The endpoint works only with Transaction Search, which is a setting of the whole account.
-    new TransactionSearch(this, 'TransactionSearch');
+    // Only the baseline copy owns it. A copy with a namespace would collide with the fixed name of the policy,
+    // and `cdk destroy` of that copy would switch tracing off for the whole account.
+    if (props.namespace === undefined) new TransactionSearch(this, 'TransactionSearch');
 
     // The alias `live` is what the API calls. CodeDeploy moves the traffic of the alias to each new version.
     const release = new GradualRelease(this, 'Release', {
@@ -92,23 +104,29 @@ export class CoreStack extends Stack {
     if (!permission || !integration) throw new Error('The API has no integration or no invoke permission.');
     integration.addResourceDependency(permission, 'The alias needs the invoke permission before the API calls it.');
 
-    new ServiceDashboard(this, 'Dashboard', { service: 'core', release, api });
+    const dashboard = new ServiceDashboard(this, 'Dashboard', { service: 'core', release, api });
+    if (props.namespace !== undefined) {
+      // The shared dashboard code (lib/service-dashboard.ts) always names the dashboard lab-svc-core.
+      // That file is the same in all four repositories, and it stays unchanged. So a copy with a namespace sets the
+      // name in the template. The property dashboardName of the construct keeps the old name, and nothing here reads it.
+      (dashboard.dashboard.node.defaultChild as CfnDashboard).addPropertyOverride('DashboardName', names.dashboardName);
+    }
 
     // A consumer service reads these two parameters to find the API and to write its IAM policy.
     new StringParameter(this, 'UrlParameter', {
-      parameterName: '/lab/core/url',
+      parameterName: names.urlParameterName,
       description: 'Base URL of the core API',
       stringValue: api.apiEndpoint,
     });
     new StringParameter(this, 'ApiArnParameter', {
-      parameterName: '/lab/core/api-arn',
+      parameterName: names.apiArnParameterName,
       description: 'Resource ARN for execute-api:Invoke on GET /items of the core API',
       stringValue: api.arnForExecuteApi(HttpMethod.GET, ITEMS_PATH),
     });
 
     // The pipeline of the other services reads this parameter. It checks the deployment order and the set of tested versions.
     const versionParameter = new StringParameter(this, 'VersionParameter', {
-      parameterName: '/lab/core/version',
+      parameterName: names.versionParameterName,
       description: 'Version of core that this stack runs',
       stringValue: props.version,
     });
