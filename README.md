@@ -4,7 +4,7 @@ This repository holds the mock "core" service of the pipeline lab.
 It is an AWS CDK app in TypeScript. The pipeline in [lab-workflows](https://github.com/jross24/lab-workflows) releases it.
 
 The service is also the pattern for the other three services. It shows a gradual Production release with an automatic rollback,
-and it shows logs, metrics, traces, a dashboard and alarms as code. A sibling service can copy the files that the section "Layout" marks.
+and it shows logs, metrics, traces, a dashboard and alarms as code. The files that the section "Layout" marks as shared come from lab-workflows, and each sibling service pins them.
 
 ## What the service is
 
@@ -888,6 +888,8 @@ A person with write access can deploy anything to the developer account with thi
 
 ## Layout
 
+The shared files are pinned copies of `shared/` in lab-workflows: 9 files in `lib/`, 7 tests and `test/support/contract-schema.ts`. `shared.lock.json` names the commit, and the job `shared` of the pull request check fails when a copy is not byte-equal to that commit. To change a shared file, change it in lab-workflows, then run `node actions/shared-files/sync.mjs <path to this repository>` in a clone of lab-workflows (see the section "Shared files" of its README).
+
 | Path | Content |
 | --- | --- |
 | `bin/app.ts` | The entry point that `cdk.json` names. |
@@ -896,11 +898,11 @@ A person with write access can deploy anything to the developer account with thi
 | `lib/core-stage.ts` | The CDK stage. |
 | `lib/namespace.ts` | The context value `namespace`: the check of the value and the names of a copy. |
 | `lib/core-stack.ts` | The stack: function, API, SSM parameters, outputs. |
-| `lib/gradual-release.ts` | **Same file in all four repositories.** The alias, the deployment group, the alarms and the `Release` type. |
-| `lib/service-dashboard.ts` | **Same file in all four repositories.** The dashboard of a stage. |
-| `lib/instrument.ts`, `lib/logger.ts`, `lib/metrics.ts` | **Same file in all four repositories.** The wrapper of the handler, the log line and the metric line. |
-| `lib/tracing.ts`, `lib/xray-exporter.ts`, `lib/sigv4.ts` | **Same file in all four repositories.** OpenTelemetry tracing, the export of spans to X-Ray, and the signature of that request. |
-| `lib/function-defaults.ts` | **Same file in all four repositories.** The memory size, the bundling settings and the sampling-ratio setting of the function. |
+| `lib/gradual-release.ts` | **Shared file.** The alias, the deployment group, the alarms and the `Release` type. |
+| `lib/service-dashboard.ts` | **Shared file.** The dashboard of a stage. |
+| `lib/instrument.ts`, `lib/logger.ts`, `lib/metrics.ts` | **Shared file.** The wrapper of the handler, the log line and the metric line. |
+| `lib/tracing.ts`, `lib/xray-exporter.ts`, `lib/sigv4.ts` | **Shared file.** OpenTelemetry tracing, the export of spans to X-Ray, and the signature of that request. |
+| `lib/function-defaults.ts` | **Shared file.** The memory size, the bundling settings and the sampling-ratio setting of the function. |
 | `lib/items-handler.ts` | The Lambda handler and the fault switch. It reads the items from the table. |
 | `lib/items-table.ts` | The DynamoDB table and its settings. |
 | `lib/migrations/` | The migration runner (`runner.ts`), its types, the version helper, the migration scripts (`0001-seed-items.ts`) and the list (`list.ts`). |
@@ -911,5 +913,6 @@ A person with write access can deploy anything to the developer account with thi
 | `scripts/copy-table.ts` | A tool for a person: copies the rows of a restored table into the live table. |
 | `contract.json` | What the service promises in its answers. See "Contract tests" in the README of lab-workflows. |
 | `pipeline.json` | The name of the service, the providers it needs, and `minRollbackVersion`. |
+| `shared.lock.json` | The pin: the commit of lab-workflows that the shared files come from. |
 | `test/` | The unit tests (vitest). `test/support/` holds the in-memory store and the helper for the contract. |
 | `.github/workflows/` | Four small files that call the workflows in lab-workflows: `pr.yml`, `preview.yml`, `redeploy.yml` and `release.yml`. |
