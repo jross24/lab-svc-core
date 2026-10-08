@@ -25,7 +25,7 @@ export class ItemsTable extends Construct {
   constructor(scope: Construct, id: string, props: ItemsTableProps) {
     super(scope, id);
     this.table = new Table(this, 'Table', {
-      partitionKey: { name: 'id', type: AttributeType.STRING },
+      partitionKey: { name: 'itemId', type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       deletionProtection: props.retain,
