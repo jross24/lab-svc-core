@@ -499,7 +499,7 @@ The latency alarm and the pipeline job were not part of this test: lab-dev has n
 
 ## How a change reaches Production
 
-1. Open a pull request. The `pr` workflow runs lint, typecheck, the tests and `cdk synth`.
+1. Open a pull request. The `pr` workflow runs lint, typecheck, the tests and `cdk synth`. It also scans the dependencies and the commits for secrets, and it checks the workflow files. It posts the `cdk diff` against Production as one comment. A delete or a replacement of a stateful resource fails the check until someone adds the label `destructive-change-approved`. The [README of lab-workflows](https://github.com/jross24/lab-workflows#the-cdk-diff-comment) explains the comment.
 2. Merge the pull request. The `release` workflow starts.
 3. The workflow works out the next version from the commit titles and creates the tag, for example `v0.2.0`.
 4. The workflow builds one time: one `cdk synth -c version=<version>`. It stores the zipped `cdk.out` in a GitHub release.
