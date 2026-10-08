@@ -87,6 +87,7 @@ The second command lists `Test/Core`, `Staging/Core` and `Production/Core`. The 
   so the alarm `ErrorsAlarm` does not see such a call. The option `serviceErrors` of `GradualRelease` adds `ServiceErrorsAlarm`. It reads the metric `errors` that the service writes itself.
   It watches the version that the stack deploys, so during a canary it sees the errors of the new version and not of the old one. Core does not use it, because core throws when it fails.
   The siblings `lab-svc-catalogue`, `lab-svc-account` and `lab-web` use it.
+  The lab ran this case in `lab-dev` with catalogue. `ErrorsAlarm` stayed `OK`, `ServiceErrorsAlarm` fired, and CodeDeploy rolled the release back after 101 seconds. See the README of lab-svc-catalogue.
 - Both alarms treat missing data as "not breaching". A quiet service sends no data. It must not alarm, and it must not block a deployment.
 - The API integration depends on the invoke permission of the alias. The first release switches a running API from the function to the alias. The order keeps the API up during that switch.
 
@@ -324,7 +325,7 @@ What the table shows:
 - **With its default settings, the layer prefers the trace of Lambda to the header of the caller.** The code of the layer (version 16) replaces the header `X-Amzn-Trace-Id` of the request with the header that Lambda made for the call. It then asks the propagators `baggage, tracecontext, xray` in this order.
   The last one that finds a valid trace wins, and that is the X-Ray header of Lambda. So an incoming `traceparent` loses, unless a team sets `OTEL_PROPAGATORS` to another order. The lab read this in the code of the layer and did not run a chain with the layer.
 - **The layer does not trace `fetch` by default.** Its list of instrumentations is `aws-sdk,aws-lambda,http`. The `fetch` of Node.js 22 does not use the `http` module, so a caller must turn on the `undici` instrumentation.
-- **The ARN of the layer holds the account ID of AWS** (`615299751070`, layer `AWSOpenTelemetryDistroJs`, version 16 in `eu-west-2`). The lab found no SSM parameter that gives it. The SDK way has no layer, so no account ID of another publisher is in this repository.
+- **The ARN of the layer holds the account ID of AWS** (an AWS-owned account, layer `AWSOpenTelemetryDistroJs`, version 16 in `eu-west-2`). The lab found no SSM parameter that gives it. The SDK way has no layer, so no account ID of another publisher is in this repository.
 
 **The third way: native active tracing and a hand-made header.** This cannot link the services. The lab sent a signed call with `X-Amzn-Trace-Id` and `traceparent` to a function with active tracing:
 
