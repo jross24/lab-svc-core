@@ -16,10 +16,12 @@
               "description": "All the items of the table, in the order of their ids.",
               "items": {
                 "type": "object",
-                "required": ["id", "title"],
+                "required": ["id", "name", "title"],
                 "properties": {
                   "id": { "type": "string" },
-                  "title": { "type": "string" }
+                  "name": { "type": "string", "description": "The old name of title. It stays until all consumers read title." },
+                  "title": { "type": "string" },
+                  "note": { "type": "string", "description": "An optional note. A throwaway field for the contract proof." }
                 }
               }
             }
