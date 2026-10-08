@@ -25,6 +25,8 @@ export interface ServiceNames {
   readonly urlParameterName: string;
   // The SSM parameter that holds the resource ARN for execute-api:Invoke on GET /items. The consumers write their IAM policy from it.
   readonly apiArnParameterName: string;
+  // The SSM parameter that holds the rollback floor of the data. The migration step of the stack writes it, not CloudFormation.
+  readonly floorParameterName: string;
   // The SSM parameter that holds the version that the stack runs. The release workflow reads the one of the baseline copy.
   readonly versionParameterName: string;
   readonly dashboardName: string;
@@ -37,6 +39,7 @@ export function namesFor(namespace?: string): ServiceNames {
       stackName: 'lab-svc-core',
       urlParameterName: '/lab/core/url',
       apiArnParameterName: '/lab/core/api-arn',
+      floorParameterName: '/lab/core/min-rollback-version',
       versionParameterName: '/lab/core/version',
       dashboardName: 'lab-svc-core',
     };
@@ -46,6 +49,7 @@ export function namesFor(namespace?: string): ServiceNames {
     stackName: `lab-svc-core-${valid}`,
     urlParameterName: `/lab/ns/${valid}/core/url`,
     apiArnParameterName: `/lab/ns/${valid}/core/api-arn`,
+    floorParameterName: `/lab/ns/${valid}/core/min-rollback-version`,
     versionParameterName: `/lab/ns/${valid}/core/version`,
     dashboardName: `lab-svc-core-${valid}`,
   };

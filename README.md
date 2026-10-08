@@ -8,7 +8,7 @@ and it shows logs, metrics, traces, a dashboard and alarms as code. A sibling se
 
 ## What the service is
 
-The service is one Lambda function behind an API Gateway HTTP API.
+The service is one Lambda function behind an API Gateway HTTP API. The function reads its items from a DynamoDB table (see "Data").
 The API has one route, `GET /items`. The function returns JSON:
 
 ```json
@@ -30,13 +30,14 @@ API Gateway answers a request with no signature with `403 Forbidden`.
 
 ### How a consumer finds the service
 
-The stack writes three SSM parameters in its account.
+The stack writes three SSM parameters in its account. The migration step writes a fourth one (see "The rollback floor").
 
 | Parameter | Value |
 | --- | --- |
 | `/lab/core/url` | The base URL of the API. Add `/items` to call the route. |
 | `/lab/core/api-arn` | The resource ARN for the IAM policy of the consumer. It allows `execute-api:Invoke` on `GET /items`. |
 | `/lab/core/version` | The version of core that the stack runs. The release workflow of lab-workflows reads it, to check the deployment order and the set of tested versions. |
+| `/lab/core/min-rollback-version` | The oldest version of core that can run against the data now. The migration step writes it, not CloudFormation. The workflow `redeploy.yml` reads it. |
 
 The gradual release changes neither of the first two values. The API and the route keep their IDs.
 The API now calls the alias `live` of the function, and not the function itself. A consumer needs no change.
@@ -51,6 +52,7 @@ Each stage holds one stack, `lab-svc-core`. The file `lib/stages.ts` holds the s
 | `logRetentionDays` | 7 | 7 | 30 |
 | `release` | all at once | all at once | canary: 10 percent, then 100 percent after 5 minutes |
 | `injectFault` | false | false | false |
+| `retainData` | true | true | true |
 
 Every stage has the same resources: the same alias, the same CodeDeploy deployment group, the same alarms and the same dashboard.
 Only the values in the table differ. So Test runs what Production runs. A unit test checks this: it compares the three templates.
@@ -70,6 +72,155 @@ grep -ho '"S3Key": "[a-f0-9]*.zip"' cdk.out/assembly-*/*.template.json
 ```
 
 The second command lists `Test/Core`, `Staging/Core` and `Production/Core`. The third command prints the same asset hash three times.
+
+## Data
+
+The service keeps its items in one DynamoDB table. This section explains the table, how its data changes with a release, and how to go back.
+
+The rule that the lab proves here: **a rollback restores code, not data.**
+So a change to the shape of the data takes two releases. The pipeline blocks a change that destroys a data store, unless a person says yes.
+And the rollback path refuses a version that cannot read the data that is there now.
+
+### The table
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Key | `id` (string) | The service looks up items by id. |
+| Billing | on demand | The lab has no steady load. It pays for requests, not for capacity. |
+| Point in time recovery | on, in every stage | It is the only way back from a bad migration. See "Restore". |
+| Encryption | the default | DynamoDB encrypts every table with a key that AWS owns. The lab needs no key of its own. |
+| Table name | none | CloudFormation makes the name. A fixed name would stop a restore from making a new table next to it. |
+| Deletion protection | on in Test, Staging and Production | DynamoDB refuses `DeleteTable` while it is on. |
+| Removal policy | `RETAIN` in Test, Staging and Production. `DESTROY` in `Dev`. | See below. |
+
+The stage config has the setting `retainData`. It is `true` in the three pipeline stages and `false` in `Dev`.
+`Dev` is a copy on a laptop or a preview of a pull request. It holds no data that matters, and a preview must not leave a table that nobody removes.
+That is the only reason for `DESTROY`. In the pipeline stages a deleted stack leaves the table, and a replaced table leaves the old table.
+
+The stateful guard of the pull request workflow protects the table from a change of code. It fails a pull request that deletes or replaces the table,
+for example a change of the key or a new logical ID, unless the pull request has the label `destructive-change-approved`.
+The guard stays silent for a pull request that only adds a table.
+
+The function that serves `GET /items` can read the table and cannot write it. The migration function can read and write it.
+
+### Migrations
+
+A migration is a numbered script in `lib/migrations`, for example `0001-seed-items.ts`. It changes the data. The list `lib/migrations/list.ts` holds all of them in order.
+A migration has these rules:
+
+- **Forward only.** A migration has no "down" step. A rollback of code does not undo data (see below), so a down step would give a wrong sense of safety.
+- **Safe to repeat.** A migration can stop in the middle. The next run starts it again. So each step must give the same result when it runs twice.
+  The scripts use conditional writes: "create the item only if it does not exist", "set the attribute only if it does not exist".
+- **Never edit one that has run.** An environment may hold its record already. Add a new migration.
+
+The **ledger** is the record of what ran. It lives in the same table as the items. A ledger record has the id `#migration#<id>`, and the status `started` or `done`.
+It also holds the phase, the version of the release that ran it, and the times.
+Because the ledger is in the table, a restore of the table restores the ledger too. The two always agree.
+"Exactly once" means this: a migration that is `done` does not run again, and a migration that is not `done` runs again until it is. The scripts are safe to repeat, so a repeat does no harm.
+
+#### The order of the steps in one deployment
+
+The migrations have two phases. The phase says where the migration runs in the deployment.
+
+1. **Expand** migrations are additive. They run **before** the new code takes traffic. Old code can still read the data afterwards.
+2. The alias moves to the new code. In Production this is a canary: 10 percent of the traffic for 5 minutes, then all of it. CloudFormation waits for the whole CodeDeploy deployment.
+3. **Contract** migrations are destructive. They run **after** the canary has finished. Old code can not read the data afterwards.
+4. The SSM parameter `/lab/core/version` changes. The release is complete.
+
+In three plain sentences: Additive steps run before the new code takes traffic. Destructive steps run only after the canary has finished. A destructive step also writes the rollback floor before it changes any data.
+
+The CDK code makes this order with plain dependencies in `lib/core-stack.ts`. The alias depends on the expand step, and the contract step depends on the alias.
+A unit test reads the template and checks both lines.
+
+If an alarm stops the canary, CodeDeploy rolls the alias back and the stack update fails. Then the contract step never runs, and the data is not destroyed.
+
+#### How it runs: a custom resource in the stack
+
+The migration step is a part of the stack. A Lambda function runs the scripts. Two custom resources of CloudFormation call it, one for each phase.
+CloudFormation runs a custom resource at the place that its dependencies give. That is how the order above works.
+The CDK framework `Provider` sits between CloudFormation and the function. It sends the answer back to CloudFormation, also when the function fails or times out.
+
+A function that throws fails the resource. That fails the stack update, and CloudFormation rolls the stack back. So a failed migration fails the release in the environment where it ran, usually Test.
+The message of the error names the migration.
+
+Why this and not a pipeline step? The lab compared two ways.
+
+| | A custom resource in the stack (chosen) | A pipeline step that invokes a migration function |
+| --- | --- | --- |
+| Same artefact in every environment | Yes. The migration code is in the cloud assembly, with the service code. | The function must come from the same assembly, so it is the same. |
+| New permission for the pipeline | None. CloudFormation invokes the function. | The role `github-deploy` needs `lambda:InvokeFunction`. |
+| Place in the deployment | Exact. Dependencies put it before or after the alias. | The step runs before or after the whole `cdk deploy`. It cannot run after the canary and before the version parameter. |
+| Failure | The stack update fails and rolls back. | The job fails. The stack is already updated. |
+| Weak point | A custom resource that does not answer hangs the stack for an hour. The `Provider` framework removes this risk. | One more step in the workflow that every service repository shares. |
+
+The custom resource keeps "build once, promote the same artefact" true, and it needs no new IAM for the pipeline. That decided it.
+A migration over a big table does not fit in a Lambda function (15 minutes at most). Use a batch job for that, and keep this step for small changes.
+
+### The rollback floor
+
+The **rollback floor** is the oldest version of core that can still run against the data in an environment.
+The SSM parameter `/lab/core/min-rollback-version` holds it in each environment. The pipeline reads it.
+The workflow `redeploy.yml` refuses a version that is older than the floor, and it says why. See "The rollback floor" in the README of lab-workflows.
+
+The file `pipeline.json` declares the floor: `minRollbackVersion`. An expand migration keeps the floor as it is, because old code still reads the data.
+The release with a contract migration raises the floor to the version of the release that ran the matching expand migration.
+Code from before that release can not read the data any more.
+
+In three plain sentences: The floor lives with the data and not with the code. A redeploy puts back an old stack, so the old stack cannot be trusted to keep the floor. So the migration step writes the floor, and it never lowers it.
+
+How it works:
+
+- The step writes the floor in each environment at each deployment. It is the highest of two values: the value in `pipeline.json` of this release, and the floors that the ledger holds.
+- A destructive migration writes its floor into its ledger record and into SSM **before** its first change of data. If the migration fails, the floor stays high.
+- An older release that is deployed again (a rollback) declares an older floor. The ledger still holds the high floor. So the redeploy keeps the high floor.
+- The runner refuses a destructive migration when the declared floor is older than the release that ran the matching expand migration. This catches a developer who forgets to raise the floor.
+- The floor parameter is not a resource of CloudFormation. A rollback of the stack would put back the old value.
+
+The canary has its own automatic rollback. If an alarm fires, CodeDeploy moves the alias back to the previous Lambda version. It does not use `redeploy.yml`, so the floor check does not see it.
+This is safe because of two rules, and the order of the steps enforces both:
+
+1. A release must read the data that the previous release wrote. During the canary the previous version still serves most of the traffic, and the new version serves the rest.
+2. A destructive step runs only after the canary has finished. Then the previous version does not serve traffic any more. If the canary rolls back, the destructive step never ran.
+
+### Restore
+
+A rollback of code does not bring back data that a migration or a person changed. Two things can: fix forward with a new migration, or restore the table from point in time recovery.
+The pipeline can not restore data. A person does it, and the lab proved the steps once in `lab-dev`.
+
+1. **Find the time.** Each ledger record has `startedAt`. Restore to a time just before the start of the migration that did the harm. Without a migration, use the time of the incident.
+   The earliest time is when point in time recovery was switched on. The latest time is about 5 minutes ago.
+2. **Restore into a new table.** DynamoDB never restores into the table that exists. It makes a new table. Use a name that shows what it is.
+   ```
+   aws dynamodb restore-table-to-point-in-time \
+     --source-table-name <live table> --target-table-name <live table>-restored \
+     --restore-date-time <time> --profile <profile>
+   ```
+   The new table has the items and the ledger from that time. It does **not** have the settings of the old table: point in time recovery is off, deletion protection is off, and the tags are gone.
+3. **Look at it.** Scan the new table and compare it with what you expect.
+4. **Point the service at the data.** The stack owns the live table, and its name is in the environment of the function. The new table has another name. Two ways:
+   - **Copy back (used in the proof).** Copy the rows of the new table into the live table: `node scripts/copy-table.ts <restored table> <live table>`.
+     The stack, the table and the name stay as they are. A row that exists only in the live table stays. The ledger is copied too. It says which migrations had run at that time,
+     so the next release runs again the migrations that came after, and that is right.
+   - **Swap.** Change the code to use the new table, or import the new table into the stack and drop the old one. This is a change of the stack, and the stateful guard blocks it.
+     The lab did not run this way. Do it only with a plan and the label `destructive-change-approved`.
+5. **Clean up.** Delete the restored table. Switch point in time recovery on again for any table that you keep.
+
+What a restore does not do: it does not change the code, and it does not change the rollback floor. The floor protects the code. If the restore goes back to before a destructive migration,
+the floor is higher than needed. Lower it only by a release with a lower `minRollbackVersion` and a ledger without the destructive record. Most of the time, leave it.
+
+#### The proof of the restore
+
+The lab ran these steps in `lab-dev` on 2026-10-08, on a copy with the namespace `dm1` (4 rows: 3 items and 1 ledger record).
+
+1. The table had been seeded by the migration at 14:00:59 UTC. The window of point in time recovery began at 14:00:08 and ended about 5 minutes before now.
+2. At 14:03 the lab damaged the live table on purpose: it deleted `item-2` and changed the name of `item-3` to `CORRUPTED`. The function returned two items, one of them wrong.
+3. The lab restored the table to 14:02:30 UTC into `lab-svc-core-dm1-restored`. The new table was `ACTIVE` after 3 minutes and 10 seconds.
+   It had the 3 original items and the ledger record. Its point in time recovery was `DISABLED` and the table had no deletion protection, as the list above says.
+4. `node scripts/copy-table.ts <restored table> <live table>` copied 4 rows. The live table then had `item-2` and the original `item-3`. The function returned the 3 original items with HTTP 200.
+5. The lab deleted the restored table.
+
+The restore needed no change of the stack. The window of point in time recovery starts when the feature is switched on and ends about 5 minutes before now.
+So a restore to a time in the last 5 minutes fails, and a restore of a table that is a few minutes old has a very small window.
 
 ## Gradual release
 
@@ -412,6 +563,17 @@ The first request of each new environment takes about 450 ms, because it opens t
 So the first call of a canary takes about 450 ms. The value 500 ms would be too near to that, and the lab-dev account showed it: a deployment was stopped by this alarm after a series of cold tests.
 The value 1000 ms is more than twice the first request. A hung call fires it, and a cold start does not. The alarm also needs two minutes in a row.
 
+**After the table (2026-10-08).** The handler reads DynamoDB now, so the lab measured again, in `lab-dev`, with 512 MB and tracing.
+The AWS SDK is part of the Lambda runtime and the bundle does not include it. The client is made when the module loads, so it counts as init and not as duration.
+
+| What | Result |
+| --- | --- |
+| The first request of a new environment, 8 environments started at the same time | `Duration` 515 to 592 ms (the `Init Duration` of 439 to 490 ms is not in the metric) |
+| A warm request | 59 to 132 ms (10 requests) |
+
+The first request takes 65 to 140 ms longer than before the table. That is the connection to DynamoDB, on top of the connection to X-Ray. A warm request takes 59 to 132 ms, against 43 to 52 ms before.
+The slowest cold request, 592 ms, is 59 percent of the threshold. So the value 1000 ms stays. The lab did not change it.
+
 ### Dashboard
 
 Each stage has one dashboard named `lab-svc-core`. `lib/service-dashboard.ts` defines it. It shows:
@@ -624,6 +786,15 @@ The shared dashboard code always names the dashboard `lab-svc-core`. So the stac
 | `lib/instrument.ts`, `lib/logger.ts`, `lib/metrics.ts` | **Same file in all four repositories.** The wrapper of the handler, the log line and the metric line. |
 | `lib/tracing.ts`, `lib/xray-exporter.ts`, `lib/sigv4.ts` | **Same file in all four repositories.** OpenTelemetry tracing, the export of spans to X-Ray, and the signature of that request. |
 | `lib/function-defaults.ts` | **Same file in all four repositories.** The memory size and the bundling settings of the function. |
-| `lib/items-handler.ts` | The Lambda handler and the fault switch. |
-| `test/` | The unit tests (vitest). |
+| `lib/items-handler.ts` | The Lambda handler and the fault switch. It reads the items from the table. |
+| `lib/items-table.ts` | The DynamoDB table and its settings. |
+| `lib/migrations/` | The migration runner (`runner.ts`), its types, the version helper, the migration scripts (`0001-seed-items.ts`) and the list (`list.ts`). |
+| `lib/migrations-resource.ts` | The migration function and the two custom resources, `Expand` and `Contract`. |
+| `lib/migrate-handler.ts` | The Lambda function that runs the migrations for CloudFormation. |
+| `lib/dynamo-store.ts` | The DynamoDB and SSM code behind the runner: the items, the ledger and the floor parameter. |
+| `lib/pipeline-file.ts` | Reads `minRollbackVersion` from `pipeline.json` at synth time. |
+| `scripts/copy-table.ts` | A tool for a person: copies the rows of a restored table into the live table. |
+| `contract.json` | What the service promises in its answers. See "Contract tests" in the README of lab-workflows. |
+| `pipeline.json` | The name of the service, the providers it needs, and `minRollbackVersion`. |
+| `test/` | The unit tests (vitest). `test/support/` holds the in-memory store and the helper for the contract. |
 | `.github/workflows/` | Three small files that call the workflows in lab-workflows. |

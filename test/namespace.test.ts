@@ -38,6 +38,13 @@ function ssmNames(stack: CloudFormationStackArtifact): string[] {
     .sort();
 }
 
+// The value of a property for each resource of a type, in the order of the template.
+function eachProperty(stack: CloudFormationStackArtifact, type: string, property: string): unknown[] {
+  return Object.values(templateOf(stack).Resources)
+    .filter((resource) => resource.Type === type)
+    .map((resource) => resource.Properties?.[property]);
+}
+
 function onlyProperty(stack: CloudFormationStackArtifact, type: string, property: string): unknown {
   const found = Object.values(templateOf(stack).Resources).filter((resource) => resource.Type === type);
   expect(found, type).toHaveLength(1);
@@ -79,6 +86,7 @@ const SCOPED_NAMES: readonly { readonly type: string; readonly path: RegExp; rea
   { type: 'AWS::ApiGatewayV2::Api', path: /^Name$/, why: 'API Gateway does not need a unique API name' },
   { type: 'AWS::ApiGatewayV2::Stage', path: /^StageName$/, why: 'the stage of one API' },
   { type: 'AWS::IAM::Policy', path: /^PolicyName$/, why: 'an inline policy belongs to one role' },
+  { type: 'AWS::DynamoDB::Table', path: /AttributeName$/, why: 'the name of a key attribute, not of a resource' },
 ];
 
 function isScoped(entry: NameEntry): boolean {
@@ -123,6 +131,7 @@ describe('namesFor', () => {
       stackName: 'lab-svc-core',
       urlParameterName: '/lab/core/url',
       apiArnParameterName: '/lab/core/api-arn',
+      floorParameterName: '/lab/core/min-rollback-version',
       versionParameterName: '/lab/core/version',
       dashboardName: 'lab-svc-core',
     });
@@ -133,6 +142,7 @@ describe('namesFor', () => {
       stackName: 'lab-svc-core-pr-12',
       urlParameterName: '/lab/ns/pr-12/core/url',
       apiArnParameterName: '/lab/ns/pr-12/core/api-arn',
+      floorParameterName: '/lab/ns/pr-12/core/min-rollback-version',
       versionParameterName: '/lab/ns/pr-12/core/version',
       dashboardName: 'lab-svc-core-pr-12',
     });
@@ -148,6 +158,7 @@ describe('namesFor', () => {
     expect(names.dashboardName.length).toBeLessThanOrEqual(255);
     expect(names.urlParameterName.length).toBeLessThanOrEqual(1011);
     expect(names.apiArnParameterName.length).toBeLessThanOrEqual(1011);
+    expect(names.floorParameterName.length).toBeLessThanOrEqual(1011);
     expect(names.versionParameterName.length).toBeLessThanOrEqual(1011);
   });
 });
@@ -192,7 +203,11 @@ describe('the app with dev=true and a namespace', () => {
   it('tags the stack and its resources with lab-namespace=<namespace>', () => {
     expect(NAMESPACE_TAG).toBe('lab-namespace');
     expect(stack.tags).toEqual({ 'lab-namespace': 'pr-12' });
-    expect(onlyProperty(stack, 'AWS::Lambda::Function', 'Tags')).toContainEqual({ Key: 'lab-namespace', Value: 'pr-12' });
+    // The service function, the migration function and the framework function of the custom resources all have the tag.
+    const tags = eachProperty(stack, 'AWS::Lambda::Function', 'Tags');
+    expect(tags).toHaveLength(3);
+    for (const functionTags of tags) expect(functionTags).toContainEqual({ Key: 'lab-namespace', Value: 'pr-12' });
+    expect(eachProperty(stack, 'AWS::DynamoDB::Table', 'Tags')[0]).toContainEqual({ Key: 'lab-namespace', Value: 'pr-12' });
   });
 
   it('does not create CloudWatch Transaction Search, which is a setting of the whole account', () => {
@@ -255,7 +270,7 @@ describe('two namespaces in one account', () => {
     }
   });
 
-  it('give no resource a fixed physical name, except the three parameters and the dashboard', () => {
+  it('give no resource a fixed physical name, except the three parameters and the dashboard (the floor parameter is not a resource)', () => {
     // A resource with no name property gets a name from CloudFormation that holds the stack name, so it is unique.
     const named = nameEntries(first)
       .filter((entry) => !isScoped(entry))
@@ -265,7 +280,7 @@ describe('two namespaces in one account', () => {
   });
 
   it('write the same version and the same Lambda code, so they can share one asset', () => {
-    const code = (stack: CloudFormationStackArtifact): unknown => onlyProperty(stack, 'AWS::Lambda::Function', 'Code');
+    const code = (stack: CloudFormationStackArtifact): unknown => eachProperty(stack, 'AWS::Lambda::Function', 'Code');
     expect(code(first)).toEqual(code(second));
   });
 });
@@ -296,7 +311,7 @@ describe('an invalid namespace', () => {
       () =>
         new CoreStack(new App(), 'Core', {
           version: '1.2.3',
-          config: { logRetentionDays: RetentionDays.ONE_WEEK, release: { kind: 'allAtOnce' }, injectFault: false },
+          config: { logRetentionDays: RetentionDays.ONE_WEEK, release: { kind: 'allAtOnce' }, injectFault: false, retainData: false },
           namespace: 'Bad-Name',
         }),
     ).toThrow(/namespace must be 1 to 20 characters/);
@@ -353,9 +368,16 @@ describe('the copies without a namespace (the baseline)', () => {
   });
 
   it('makes the Dev stage the same template as the Test stage, apart from the stage config', () => {
-    // The Dev stage keeps the logs for 3 days and the Test stage keeps them for 7. Nothing else may differ.
+    // The Dev stage keeps the logs for 3 days and the Test stage keeps them for 7. The Dev stage does not keep the
+    // table and the floor parameter when the stack goes (retainData). The description of the framework function holds
+    // the path of the construct, and the path holds the name of the stage. Nothing else may differ.
     const normalised = (assembly: CloudAssembly, stage: string): string =>
-      JSON.stringify(stackOfStage(assembly, stage).template).replace(/"RetentionInDays":[0-9]+/g, '"RetentionInDays":0');
+      JSON.stringify(stackOfStage(assembly, stage).template)
+        .replace(/"RetentionInDays":[0-9]+/g, '"RetentionInDays":0')
+        .replace(/"(DeletionPolicy|UpdateReplacePolicy)":"(Retain|Delete)"/g, '"$1":"x"')
+        .replace(/"DeletionProtectionEnabled":(true|false),?/g, '')
+        .replace(/"Retain":"(true|false)"/g, '"Retain":"x"')
+        .replace(/\((Test|Staging|Production|Dev)\/Core\/Migrations\/Provider\)/g, '(Stage/Core/Migrations/Provider)');
     expect(normalised(dev, 'Dev')).toBe(normalised(pipeline, 'Test'));
   });
 });
