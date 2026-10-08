@@ -224,6 +224,32 @@ describe('the app with dev=true and a namespace', () => {
     });
   });
 
+  it('has its own table, and removes it with the stack: no deletion protection and the removal policy Delete', () => {
+    const tables = Object.values(template.Resources).filter((resource) => resource.Type === 'AWS::DynamoDB::Table');
+    expect(tables).toHaveLength(1);
+    expect(tables[0]).toMatchObject({ DeletionPolicy: 'Delete', UpdateReplacePolicy: 'Delete' });
+    expect(tables[0]?.Properties).not.toHaveProperty('TableName');
+    expect(tables[0]?.Properties?.DeletionProtectionEnabled).not.toBe(true);
+    // The restore practice needs point in time recovery, so it stays on.
+    expect(tables[0]?.Properties?.PointInTimeRecoverySpecification).toEqual({ PointInTimeRecoveryEnabled: true });
+  });
+
+  it('writes the rollback floor to its own parameter and removes it with the stack', () => {
+    const migrationFunctions = Object.values(template.Resources).filter(
+      (resource) => resource.Type === 'AWS::Lambda::Function' && JSON.stringify(resource).includes('FLOOR_PARAMETER'),
+    );
+    expect(migrationFunctions).toHaveLength(1);
+    expect(JSON.stringify(migrationFunctions[0]?.Properties?.Environment)).toContain('"FLOOR_PARAMETER":"/lab/ns/pr-12/core/min-rollback-version"');
+    // The function may write only that parameter. The baseline floor of the account stays out of reach.
+    const parameterArns = Object.values(template.Resources)
+      .filter((resource) => resource.Type === 'AWS::IAM::Policy')
+      .flatMap((policy) => JSON.stringify(policy).match(/:parameter\/[A-Za-z0-9/_-]*/g) ?? []);
+    expect(parameterArns).toEqual([':parameter/lab/ns/pr-12/core/min-rollback-version']);
+    // Retain false tells the custom resources to delete the floor parameter on a delete of the stack.
+    const migrations = eachProperty(stack, 'Custom::CoreMigrations', 'Retain');
+    expect(migrations).toEqual(['false', 'false']);
+  });
+
   it('exports no output, because an export name is unique in the account', () => {
     for (const [name, output] of Object.entries(template.Outputs)) {
       expect(output.Export, name).toBeUndefined();
@@ -363,6 +389,31 @@ describe('the copies without a namespace (the baseline)', () => {
     expect(text).not.toContain('lab-namespace');
     expect(text).not.toContain('/lab/ns/');
     expect(text).not.toContain('"Tags"');
+  });
+
+  // What the table, the migration step and the floor parameter did before the namespace existed, for each stage.
+  // The pipeline stages keep the data. The Dev stage with no namespace is the baseline copy in the developer account,
+  // and it has always removed its table with the stack. A namespace must change none of this.
+  it.each([
+    ['Test', pipeline, 'Retain', true],
+    ['Staging', pipeline, 'Retain', true],
+    ['Production', pipeline, 'Retain', true],
+    ['Dev', dev, 'Delete', false],
+  ] as const)('keeps the table, the migration step and the floor parameter of the stage %s', (stage, assembly, policy, protectedTable) => {
+    const stack = stackOfStage(assembly, stage);
+    const template = templateOf(stack);
+    const tables = Object.values(template.Resources).filter((resource) => resource.Type === 'AWS::DynamoDB::Table');
+    expect(tables).toHaveLength(1);
+    expect(tables[0]).toMatchObject({ DeletionPolicy: policy, UpdateReplacePolicy: policy });
+    expect(tables[0]?.Properties?.DeletionProtectionEnabled === true).toBe(protectedTable);
+    expect(tables[0]?.Properties?.PointInTimeRecoverySpecification).toEqual({ PointInTimeRecoveryEnabled: true });
+    expect(tables[0]?.Properties).not.toHaveProperty('TableName');
+    expect(eachProperty(stack, 'Custom::CoreMigrations', 'Retain')).toEqual([String(protectedTable), String(protectedTable)]);
+    expect(JSON.stringify(eachProperty(stack, 'AWS::Lambda::Function', 'Environment'))).toContain('"FLOOR_PARAMETER":"/lab/core/min-rollback-version"');
+    const parameterArns = Object.values(template.Resources)
+      .filter((resource) => resource.Type === 'AWS::IAM::Policy')
+      .flatMap((resource) => JSON.stringify(resource).match(/:parameter\/[A-Za-z0-9/_-]*/g) ?? []);
+    expect(parameterArns).toEqual([':parameter/lab/core/min-rollback-version']);
   });
 
   it('makes the Dev stage the same template as the Test stage, apart from the stage config', () => {
