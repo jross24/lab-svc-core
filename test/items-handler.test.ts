@@ -47,9 +47,9 @@ describe('items handler', () => {
     expect(body).toMatchObject({
       service: 'core',
       items: [
-        { id: 'item-1', name: 'First item' },
-        { id: 'item-2', name: 'Second item' },
-        { id: 'item-3', name: 'Third item' },
+        { id: 'item-1', name: 'First item', title: 'First item' },
+        { id: 'item-2', name: 'Second item', title: 'Second item' },
+        { id: 'item-3', name: 'Third item', title: 'Third item' },
       ],
     });
   });
@@ -68,11 +68,30 @@ describe('items handler', () => {
 });
 
 describe('items handler data', () => {
-  it('returns the items in the order of the reader and keeps only id and name', async () => {
-    rows = [{ id: 'item-9', name: 'Ninth', extra: 'ignored' }];
+  it('returns the items in the order of the reader and keeps only id, name and title', async () => {
+    rows = [{ id: 'item-9', name: 'Ninth', title: 'Ninth', extra: 'ignored' }];
     const body: unknown = JSON.parse((await handler(EVENT, CONTEXT)).body);
-    expect(body).toMatchObject({ items: [{ id: 'item-9', name: 'Ninth' }] });
+    expect(body).toMatchObject({ items: [{ id: 'item-9', name: 'Ninth', title: 'Ninth' }] });
     expect(JSON.stringify(body)).not.toContain('ignored');
+  });
+
+  // The EXPAND step of the rename: the handler reads either attribute and returns both.
+  it('returns both name and title for an item from before the migration (only name)', async () => {
+    rows = [{ id: 'item-1', name: 'First item' }];
+    const body: unknown = JSON.parse((await handler(EVENT, CONTEXT)).body);
+    expect(body).toMatchObject({ items: [{ id: 'item-1', name: 'First item', title: 'First item' }] });
+  });
+
+  it('returns both name and title for an item from after the contract (only title)', async () => {
+    rows = [{ id: 'item-1', title: 'First item' }];
+    const body: unknown = JSON.parse((await handler(EVENT, CONTEXT)).body);
+    expect(body).toMatchObject({ items: [{ id: 'item-1', name: 'First item', title: 'First item' }] });
+  });
+
+  it('keeps each attribute when the two differ', async () => {
+    rows = [{ id: 'item-1', name: 'Old', title: 'New' }];
+    const body: unknown = JSON.parse((await handler(EVENT, CONTEXT)).body);
+    expect(body).toMatchObject({ items: [{ id: 'item-1', name: 'Old', title: 'New' }] });
   });
 
   it('returns an empty list for an empty table', async () => {
@@ -81,9 +100,9 @@ describe('items handler data', () => {
     expect(body).toMatchObject({ items: [] });
   });
 
-  it('throws when an item has no name, so Lambda counts an error and the alarms see a fault in the data', async () => {
+  it('throws when an item has neither name nor title, so Lambda counts an error and the alarms see a fault in the data', async () => {
     rows = [{ id: 'item-1' }];
-    await expect(handler(EVENT, CONTEXT)).rejects.toThrow(/item-1 has no attribute name/);
+    await expect(handler(EVENT, CONTEXT)).rejects.toThrow(/item-1 has neither the attribute name nor the attribute title/);
     expect(JSON.parse(written[0] ?? '')).toMatchObject({ level: 'ERROR', status: 500 });
   });
 
