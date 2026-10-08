@@ -536,11 +536,18 @@ A function that gets a bad value anyway samples all requests, because a trace th
 The endpoint accepts spans only when CloudWatch Transaction Search is on. The setting belongs to the whole account and the whole region.
 Then X-Ray writes each span as a log event into the log group `aws/spans`, and indexes a part of the spans as traces that `aws xray batch-get-traces` finds.
 
-`lib/transaction-search.ts` turns it on with two resources: a policy of CloudWatch Logs that lets X-Ray write into `aws/spans` of this account, and `AWS::XRay::TransactionSearchConfig` with 100 percent indexing.
-The setting is moving to the platform stack of [lab-platform](https://github.com/jross24/lab-platform) ([lab-platform#27](https://github.com/jross24/lab-platform/issues/27)).
-Until the move ends, core still has the two resources, and both have `DeletionPolicy: Retain`. The next core release removes them from this stack, and the real policy and the real setting stay in the account.
-A release of core that takes the resources out of the stack without `Retain` would delete them, and the delete switches tracing off for all four services.
-The first deployment waits until the setting is active. This took 6 minutes in the lab-dev account. So the job `deploy-test` has a limit of 15 minutes now.
+**The platform stack owns the setting, not core.** All four services send spans to the same endpoint, so the setting belongs to the platform.
+The stack `Platform` of [lab-platform](https://github.com/jross24/lab-platform) has the two resources: a policy of CloudWatch Logs that lets X-Ray write into `aws/spans`, and `AWS::XRay::TransactionSearchConfig`.
+Its README explains the settings and the effects ([lab-platform#27](https://github.com/jross24/lab-platform/issues/27)). The template of core has no resource for it.
+
+Core owned the setting before. It moves in two core releases, so tracing never stops:
+the first release set `DeletionPolicy: Retain` on both resources, and the second release removes them from the stack. The real policy and the real setting stay in the account, and the platform stack takes them over with a resource import.
+A core release that removes the resources without `Retain` first would delete them, and the delete switches tracing off for all four services.
+
+**Do not redeploy an old core release.** A release from before this move still has the two resources in its template. The `redeploy` workflow would try to create them again, and the platform stack owns them, so the deployment fails.
+Roll forward with a new release instead.
+
+The job `deploy-test` has a limit of 15 minutes, because the first creation of the setting took about 6 minutes. Core no longer creates it, so the limit can go down ([lab-workflows#7](https://github.com/jross24/lab-workflows/pull/7)).
 
 #### What was measured
 
@@ -624,7 +631,7 @@ Memory is the right fix here, and not a work-around. Lambda gives CPU in proport
 
 - Where the spans leave the function. The export waits on the request path, and the owner accepted the cost ([lab-platform#28](https://github.com/jross24/lab-platform/issues/28)).
   A team that cannot pay about 35 ms for each request would sample fewer requests first (the ratio above), and then look at a layer or an extension.
-- Who owns Transaction Search and how many spans are sampled and indexed ([lab-platform#27](https://github.com/jross24/lab-platform/issues/27)).
+- How many spans are sampled and indexed. The platform stack owns the setting and indexes 100 percent ([lab-platform#27](https://github.com/jross24/lab-platform/issues/27)).
 - The public APIs accept a `traceparent` header from any caller. That is how a trace starts in the middle. A real team may ignore the header at the edge.
 - The lab traces the calls of the code and not the SDK of AWS, because the services call no AWS API. A service that does would add the instrumentation for it.
 
@@ -815,8 +822,7 @@ The consumer services of the account read `/lab/core/url` and `/lab/core/api-arn
 An account holds one baseline copy, and it stays deployed. To run a second copy, use a namespace.
 The `Dev` stage has the alias, the deployment group, the alarms and the dashboard too. It releases all at once.
 
-The baseline copy also turns on CloudWatch Transaction Search in the account (see "Tracing"). That setting belongs to the whole account.
-The first deployment waits about 6 minutes for it. Both resources have `DeletionPolicy: Retain`, so `cdk destroy` of the baseline copy leaves the setting on.
+CloudWatch Transaction Search (see "Tracing") is a setting of the whole account. The platform stack owns it, so `cdk destroy` of the baseline copy does not touch it.
 
 ### Namespaces
 
@@ -851,8 +857,7 @@ The names that the namespace changes:
 Nothing else of the stack has a fixed name. CloudFormation builds the other names from the stack name, so they are unique too.
 A unit test compares all Name-like properties of two namespaces. It fails when a new fixed name appears.
 
-**Transaction Search.** A copy with a namespace does not create CloudWatch Transaction Search. The setting belongs to the whole account.
-The policy has the fixed name `lab-xray-can-write-spans`. A second copy would collide with it. Only the baseline copy has the two resources.
+**Transaction Search.** No copy of core creates CloudWatch Transaction Search. The platform stack owns the setting of the whole account, with the fixed policy name `lab-xray-can-write-spans`.
 
 **The consumers.** A consumer service reads `/lab/core/url` and `/lab/core/api-arn` by default. So a consumer still calls the baseline copy.
 A copy of core with a namespace is for a consumer that names it with a context value (`coreNamespace` in the consumer). The consumers do not have that value yet.
@@ -873,7 +878,6 @@ The shared dashboard code always names the dashboard `lab-svc-core`. So the stac
 | `lib/core-stage.ts` | The CDK stage. |
 | `lib/namespace.ts` | The context value `namespace`: the check of the value and the names of a copy. |
 | `lib/core-stack.ts` | The stack: function, API, SSM parameters, outputs. |
-| `lib/transaction-search.ts` | Core only. CloudWatch Transaction Search for the whole account: the policy for the log group `aws/spans` and the setting. |
 | `lib/gradual-release.ts` | **Same file in all four repositories.** The alias, the deployment group, the alarms and the `Release` type. |
 | `lib/service-dashboard.ts` | **Same file in all four repositories.** The dashboard of a stage. |
 | `lib/instrument.ts`, `lib/logger.ts`, `lib/metrics.ts` | **Same file in all four repositories.** The wrapper of the handler, the log line and the metric line. |
