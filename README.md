@@ -15,11 +15,11 @@ The API has one route, `GET /items`. The function returns JSON:
 {
   "service": "core",
   "version": "0.1.0",
-  "items": [{ "id": "item-1", "name": "First item", "title": "First item" }]
+  "items": [{ "id": "item-1", "title": "First item" }]
 }
 ```
 
-Each item has both `name` and `title`, with the same value. `title` is the new name of the attribute `name`. A later release removes `name`.
+Each item has the attribute `title`. It is the new name of the attribute `name`. The migration `0003-drop-name` removed `name`, so the answer no longer has it.
 
 The `version` field shows which release runs. The stack sets it as an environment variable of the function.
 
