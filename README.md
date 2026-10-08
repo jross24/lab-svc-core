@@ -30,14 +30,15 @@ API Gateway answers a request with no signature with `403 Forbidden`.
 
 ### How a consumer finds the service
 
-The stack writes two SSM parameters in its account.
+The stack writes three SSM parameters in its account.
 
 | Parameter | Value |
 | --- | --- |
 | `/lab/core/url` | The base URL of the API. Add `/items` to call the route. |
 | `/lab/core/api-arn` | The resource ARN for the IAM policy of the consumer. It allows `execute-api:Invoke` on `GET /items`. |
+| `/lab/core/version` | The version of core that the stack runs. The release workflow of lab-workflows reads it, to check the deployment order and the set of tested versions. |
 
-The gradual release changes neither value. The API and the route keep their IDs.
+The gradual release changes neither of the first two values. The API and the route keep their IDs.
 The API now calls the alias `live` of the function, and not the function itself. A consumer needs no change.
 
 ## Stages
