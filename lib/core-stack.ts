@@ -17,7 +17,6 @@ import { Migrations } from './migrations-resource.ts';
 import { NAMESPACE_TAG, namesFor } from './namespace.ts';
 import { readDeclaredFloor } from './pipeline-file.ts';
 import { ServiceDashboard } from './service-dashboard.ts';
-import { TransactionSearch } from './transaction-search.ts';
 import type { StageConfig } from './stages.ts';
 
 const ITEMS_PATH = '/items';
@@ -79,10 +78,8 @@ export class CoreStack extends Stack {
     // The function sends its spans to the OTLP endpoint of X-Ray. The endpoint checks this permission.
     // X-Ray actions do not support a resource, so the resource is *.
     itemsFunction.addToRolePolicy(new PolicyStatement({ actions: ['xray:PutTraceSegments'], resources: ['*'] }));
-    // The endpoint works only with Transaction Search, which is a setting of the whole account.
-    // Only the baseline copy owns it. A copy with a namespace would collide with the fixed name of the policy,
-    // and `cdk destroy` of that copy would switch tracing off for the whole account.
-    if (props.namespace === undefined) new TransactionSearch(this, 'TransactionSearch');
+    // The endpoint works only with CloudWatch Transaction Search, a setting of the whole account.
+    // The platform stack (lab-platform) owns it, so this stack has no resource for it.
 
     // The alias `live` is what the API calls. CodeDeploy moves the traffic of the alias to each new version.
     const release = new GradualRelease(this, 'Release', {

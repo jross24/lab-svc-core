@@ -210,9 +210,7 @@ describe('the app with dev=true and a namespace', () => {
     expect(eachProperty(stack, 'AWS::DynamoDB::Table', 'Tags')[0]).toContainEqual({ Key: 'lab-namespace', Value: 'pr-12' });
   });
 
-  it('does not create CloudWatch Transaction Search, which is a setting of the whole account', () => {
-    // The baseline copy owns the setting. A copy with a namespace would collide with its fixed policy name,
-    // and cdk destroy of the copy would switch tracing off for the account.
+  it('has no CloudWatch Transaction Search, which the platform stack owns for the whole account', () => {
     const types = Object.values(template.Resources).map((resource) => resource.Type);
     expect(types).not.toContain('AWS::XRay::TransactionSearchConfig');
     expect(types).not.toContain('AWS::Logs::ResourcePolicy');
@@ -352,10 +350,10 @@ describe('the copies without a namespace (the baseline)', () => {
     expect(onlyProperty(stack, 'AWS::CloudWatch::Dashboard', 'DashboardName')).toBe('lab-svc-core');
   });
 
-  it.each(stages)('keeps CloudWatch Transaction Search in the stage %s', (stage, assembly) => {
+  it.each(stages)('has no CloudWatch Transaction Search in the stage %s, because the platform stack owns it', (stage, assembly) => {
     const types = Object.values(templateOf(stackOfStage(assembly, stage)).Resources).map((resource) => resource.Type);
-    expect(types).toContain('AWS::XRay::TransactionSearchConfig');
-    expect(types).toContain('AWS::Logs::ResourcePolicy');
+    expect(types).not.toContain('AWS::XRay::TransactionSearchConfig');
+    expect(types).not.toContain('AWS::Logs::ResourcePolicy');
   });
 
   it.each(stages)('has no namespace tag and no namespace parameter in the stage %s', (stage, assembly) => {
