@@ -864,7 +864,9 @@ A unit test compares all Name-like properties of two namespaces. It fails when a
 **Transaction Search.** No copy of core creates CloudWatch Transaction Search. The platform stack owns the setting of the whole account, with the fixed policy name `lab-xray-can-write-spans`.
 
 **The consumers.** A consumer service reads `/lab/core/url` and `/lab/core/api-arn` by default. So a consumer still calls the baseline copy.
-A copy of core with a namespace is for a consumer that names it with a context value (`coreNamespace` in the consumer). The consumer then reads `/lab/ns/<core namespace>/core/url` and `/lab/ns/<core namespace>/core/api-arn`. The consumers do not have that value yet.
+A copy of core with a namespace is for a consumer that names it with a context value (`coreNamespace` in the consumer). The consumer then reads `/lab/ns/<core namespace>/core/url` and `/lab/ns/<core namespace>/core/api-arn`.
+Only `lab-svc-account` has this value, and it is valid only together with `namespace`.
+`lab-svc-catalogue` has no such value, and none is planned. A test of catalogue runs against the baseline copy of core. `lab-web` has none, because web does not call core.
 
 **The version.** Give each copy its own `version`. The default `0.0.0-dev` belongs to the baseline copy.
 The pipeline uses a version such as `0.0.0-pr12.abc1234`.
